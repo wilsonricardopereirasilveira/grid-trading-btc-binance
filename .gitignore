@@ -1,0 +1,24 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+main
+
+# Logs
+*.log
+
+# Environment variables
+.env
+
+# Data / Generated files
+analyze_strategy.csv
+balances.json
+transactions.json
+
+# IDEs
+.vscode/
+.idea/
+*.swp
