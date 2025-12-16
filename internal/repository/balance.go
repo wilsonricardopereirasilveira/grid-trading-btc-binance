@@ -1,77 +1,71 @@
 package repository
 
 import (
-	"fmt"
-	"grid-trading-btc-binance/internal/logger"
 	"grid-trading-btc-binance/internal/model"
+	"sync"
 )
 
-const balancesFile = "balances.json"
-
 type BalanceRepository struct {
-	storage *Storage
-	cache   map[string]*model.Balance
+	cache map[string]*model.Balance
+	mu    sync.RWMutex
 }
 
-func NewBalanceRepository(storage *Storage) *BalanceRepository {
+func NewBalanceRepository() *BalanceRepository {
 	return &BalanceRepository{
-		storage: storage,
-		cache:   make(map[string]*model.Balance),
+		cache: make(map[string]*model.Balance),
 	}
 }
 
-func (r *BalanceRepository) Load() error {
-	if !r.storage.Exists(balancesFile) {
-		logger.Info("balances.json not found, initializing with defaults")
-		return r.initDefaults()
-	}
+// SetBalances replaces the entire balance cache with new data from API
+func (r *BalanceRepository) SetBalances(balances []model.Balance) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	var balances []model.Balance
-	if err := r.storage.Read(balancesFile, &balances); err != nil {
-		return err
-	}
+	// Re-initialize map or clear it?
+	// To be safe and handling strictly what API sends, we can clear.
+	// But if API omits something that we have (locally), we might lose it?
+	// The API returns "non-zero balances". If we had it and now it's zero, API won't send it.
+	// So we should probably verify if we want to keep zero balances or not.
+	// For simplicity, let's update existing and add new.
+	// But if user withdrew everything, we should set to 0.
+	// "omitZeroBalances=true" means we won't get 0s.
+	// If we clear map, we lose 0s.
+	// Let's just blindly update/insert for now.
+	// If a balance becomes 0 on binance and they don't send it, our local cache will stay at old value?
+	// That's a risk.
+	// However, usually we care about what we HAVE.
+	// Let's clear and rebuild to be 100% in sync with API (assuming API sends all relevant info).
+	// If API sends only non-zero, then 0s are effectively 0.
 
+	r.cache = make(map[string]*model.Balance)
 	for i := range balances {
 		r.cache[balances[i].Currency] = &balances[i]
 	}
-	return nil
-}
-
-func (r *BalanceRepository) initDefaults() error {
-	defaults := []model.Balance{
-		{Currency: "BNB", Amount: 0.022611329296234092},
-		{Currency: "BTC", Amount: 0},
-		{Currency: "USDT", Amount: 37.26492662018087},
-	}
-
-	if err := r.storage.Write(balancesFile, defaults); err != nil {
-		return fmt.Errorf("failed to write default balances: %w", err)
-	}
-
-	for i := range defaults {
-		r.cache[defaults[i].Currency] = &defaults[i]
-	}
-	return nil
 }
 
 func (r *BalanceRepository) Get(currency string) (*model.Balance, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	b, ok := r.cache[currency]
-	return b, ok
+	if !ok {
+		return nil, false
+	}
+	// Return a copy to prevent race conditions if caller modifies it?
+	// The original code returned pointer. Let's return pointer but safely.
+	// Ideally return value, but rest of app expects pointer?
+	// Let's return a copy of the struct, but as a pointer.
+	val := *b
+	return &val, true
 }
 
 func (r *BalanceRepository) Update(currency string, amount float64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	if b, ok := r.cache[currency]; ok {
 		b.Amount = amount
 	} else {
 		r.cache[currency] = &model.Balance{Currency: currency, Amount: amount}
 	}
-	return r.save()
-}
-
-func (r *BalanceRepository) save() error {
-	var balances []model.Balance
-	for _, b := range r.cache {
-		balances = append(balances, *b)
-	}
-	return r.storage.Write(balancesFile, balances)
+	return nil
 }

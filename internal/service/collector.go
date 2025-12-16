@@ -43,6 +43,13 @@ func (c *DataCollector) CollectAndSave() {
 		inRange = "true"
 	}
 
+	// Range Utilization
+	rangeDiff := c.Cfg.RangeMax - c.Cfg.RangeMin
+	rangeUtilizationPct := 0.0
+	if rangeDiff > 0 {
+		rangeUtilizationPct = ((btcPrice - c.Cfg.RangeMin) / rangeDiff) * 100
+	}
+
 	// Wallet Data
 	balanceUSDT := c.getBalance("USDT")
 	balanceBTC := c.getBalance("BTC")
@@ -58,6 +65,35 @@ func (c *DataCollector) CollectAndSave() {
 		inventoryRatio = (balanceBTC * btcPrice) / strategyEquity
 	}
 
+	// Open Orders & Position Analysis (Unrealized PnL)
+	allTx := c.TransactionRepo.GetAll()
+	openOrdersCount := 0
+	totalCostBasis := 0.0
+	totalQtyFilled := 0.0
+
+	for _, tx := range allTx {
+		if tx.Symbol == c.Cfg.Symbol {
+			if tx.StatusTransaction == "open" {
+				openOrdersCount++
+			} else if tx.StatusTransaction == "filled" && tx.Type == "buy" {
+				p, _ := strconv.ParseFloat(tx.Price, 64)
+				q, _ := strconv.ParseFloat(tx.Amount, 64)
+				totalCostBasis += (p * q)
+				totalQtyFilled += q
+			}
+		}
+	}
+
+	avgEntryPrice := 0.0
+	if totalQtyFilled > 0 {
+		avgEntryPrice = totalCostBasis / totalQtyFilled
+	}
+
+	unrealizedPnL := 0.0
+	if balanceBTC > 0 && avgEntryPrice > 0 {
+		unrealizedPnL = (btcPrice - avgEntryPrice) * balanceBTC
+	}
+
 	// Performance Hourly (Last 1h)
 	lastHour := now.Add(-1 * time.Hour)
 	recentTx := c.TransactionRepo.GetTransactionsAfter(lastHour)
@@ -70,12 +106,17 @@ func (c *DataCollector) CollectAndSave() {
 	realizedProfit := 0.0
 	totalBuyPrice := 0.0
 	totalSellPrice := 0.0
+	feesBNB := 0.0
 
 	for _, tx := range recentTx {
 		tradesTotal++
 		amount, _ := strconv.ParseFloat(tx.Amount, 64)
 		price, _ := strconv.ParseFloat(tx.Price, 64)
+		fee, _ := strconv.ParseFloat(tx.Fee, 64)
 		totalVal := amount * price
+
+		// Accumulate Fees (Assuming BNB per user request)
+		feesBNB += fee
 
 		if tx.Type == "buy" {
 			tradesBuy++
@@ -107,11 +148,13 @@ func (c *DataCollector) CollectAndSave() {
 		avgSellPrice = totalSellPrice / float64(tradesSell)
 	}
 
+	feesUSDTEquiv := feesBNB * bnbPrice
+
 	// 2. Prepare CSV Record
 	record := []string{
 		timestamp,
 		"grid-trading-btc-binance", // strategy_name
-		c.Cfg.Exchange,
+		"binance",                  // exchange (hardcoded as strategy is binance specific)
 		c.Cfg.Symbol,
 		"1h", // timeframe
 
@@ -143,10 +186,22 @@ func (c *DataCollector) CollectAndSave() {
 		fmt.Sprintf("%.4f", realizedProfit),
 		fmt.Sprintf("%.2f", avgBuyPrice),
 		fmt.Sprintf("%.2f", avgSellPrice),
+		fmt.Sprintf("%.8f", feesBNB),
+		fmt.Sprintf("%.4f", feesUSDTEquiv),
+		fmt.Sprintf("%d", openOrdersCount),
+		fmt.Sprintf("%.8f", feesBNB),
+		fmt.Sprintf("%.4f", feesUSDTEquiv),
+		fmt.Sprintf("%d", openOrdersCount),
+		fmt.Sprintf("%.4f", unrealizedPnL),
+		fmt.Sprintf("%.2f", rangeUtilizationPct),
 	}
 
 	// 3. Save to CSV
-	c.appendToCSV("analyze_strategy.csv", record)
+	// Ensure folder exists
+	if _, err := os.Stat("logs"); os.IsNotExist(err) {
+		os.Mkdir("logs", 0755)
+	}
+	c.appendToCSV("logs/analyze_strategy.csv", record)
 }
 
 func (c *DataCollector) getBalance(currency string) float64 {
@@ -181,6 +236,7 @@ func (c *DataCollector) appendToCSV(filename string, record []string) {
 			"btc_price", "bnb_price", "in_range",
 			"balance_usdt", "balance_btc", "balance_bnb", "strategy_equity_usdt", "inventory_ratio_btc",
 			"trades_total", "trades_buy", "trades_sell", "volume_usdt", "volume_btc", "realized_profit_usdt", "avg_buy_price", "avg_sell_price",
+			"total_fees_bnb", "total_fees_usdt_equiv", "open_orders_count", "unrealized_pnl_usdt", "range_utilization_pct",
 		}
 		if err := w.Write(header); err != nil {
 			logger.Error("Failed to write CSV header", "error", err)

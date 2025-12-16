@@ -48,6 +48,15 @@ func (r *TransactionRepository) Update(tx model.Transaction) error {
 	return fmt.Errorf("transaction not found: %s", tx.ID)
 }
 
+func (r *TransactionRepository) Get(id string) (model.Transaction, bool) {
+	for _, tx := range r.transactions {
+		if tx.ID == id {
+			return tx, true
+		}
+	}
+	return model.Transaction{}, false
+}
+
 func (r *TransactionRepository) GetAll() []model.Transaction {
 	return r.transactions
 }
@@ -69,4 +78,23 @@ func (r *TransactionRepository) GetTransactionsAfter(timestamp time.Time) []mode
 		}
 	}
 	return filtered
+}
+
+// Remove deletes a transaction by ID and saves to file
+func (r *TransactionRepository) Remove(id string) error {
+	for i, tx := range r.transactions {
+		if tx.ID == id {
+			// Remove element
+			r.transactions = append(r.transactions[:i], r.transactions[i+1:]...)
+			return r.storage.Write(transactionsFile, r.transactions)
+		}
+	}
+	// If not found, return nil or error? Return nil to be idempotent.
+	return nil
+}
+
+// Clear removes all transactions and saves empty list
+func (r *TransactionRepository) Clear() error {
+	r.transactions = []model.Transaction{}
+	return r.storage.Write(transactionsFile, r.transactions)
 }

@@ -10,10 +10,6 @@ import (
 
 type Config struct {
 	Symbol          string
-	Exchange        string
-	StateKey        string
-	Source          string
-	App             string
 	MakerFeePct     float64
 	TakerFeePct     float64
 	GridLevels      int
@@ -24,6 +20,7 @@ type Config struct {
 	MaxSpreadPct    float64
 	RangeMin        float64
 	RangeMax        float64
+	MinOrderValue   float64
 
 	// Metrics
 	MsTimeProduction int64
@@ -49,26 +46,6 @@ func Load() (*Config, error) {
 	cfg.Symbol = os.Getenv("SYMBOL")
 	if cfg.Symbol == "" {
 		return nil, fmt.Errorf("SYMBOL is required")
-	}
-
-	cfg.Exchange = os.Getenv("EXCHANGE")
-	if cfg.Exchange == "" {
-		return nil, fmt.Errorf("EXCHANGE is required")
-	}
-
-	cfg.StateKey = os.Getenv("STATE_KEY")
-	if cfg.StateKey == "" {
-		return nil, fmt.Errorf("STATE_KEY is required")
-	}
-
-	cfg.Source = os.Getenv("SOURCE")
-	if cfg.Source == "" {
-		return nil, fmt.Errorf("SOURCE is required")
-	}
-
-	cfg.App = os.Getenv("APP")
-	if cfg.App == "" {
-		return nil, fmt.Errorf("APP is required")
 	}
 
 	cfg.MakerFeePct, err = parseFloat(os.Getenv("MAKER_FEE_PCT"), "MAKER_FEE_PCT")
@@ -121,16 +98,16 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	// Optional/Defaulted fields
-	msTimeStr := os.Getenv("MS_TIME_PRODUCTION")
-	if msTimeStr != "" {
-		cfg.MsTimeProduction, _ = strconv.ParseInt(msTimeStr, 10, 64)
+	cfg.MinOrderValue, err = parseFloat(os.Getenv("MIN_ORDER_VALUE"), "MIN_ORDER_VALUE")
+	if err != nil {
+		return nil, err
 	}
 
-	totalCyclesStr := os.Getenv("TOTAL_CYCLES")
-	if totalCyclesStr != "" {
-		cfg.TotalCycles, _ = strconv.ParseInt(totalCyclesStr, 10, 64)
-	}
+	// We no longer load metrics from .env, but we keep the struct fields for runtime usage if needed.
+	// Actually, user said to remove from .env but keep showing in log.
+	// We can initialize them to 0 or defaults here if we want, or just leave them as 0.
+	// The requirement: "não popule nada no .env".
+	// So we don't read them from .env.
 
 	cfg.BinanceApiKey = os.Getenv("BINANCE_API_KEY")
 	cfg.BinanceSecretKey = os.Getenv("BINANCE_SECRET_KEY")

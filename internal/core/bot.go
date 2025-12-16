@@ -53,6 +53,7 @@ func (b *Bot) Run() {
 	delay := time.Until(nextHour)
 
 	logger.Info("Scheduling Data Collector", "next_run", nextHour.Format(time.TimeOnly), "delay", delay)
+	logger.Info("📊 CSV Generation will occur at", "time", nextHour.Format("15:04:05"))
 
 	// Create a channel that will receive ticks starting from next hour
 	dataTickerCh := make(chan time.Time)

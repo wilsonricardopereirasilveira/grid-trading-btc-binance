@@ -58,7 +58,7 @@ func (s *TelegramService) SendMessage(text string) {
 	}()
 }
 
-func (s *TelegramService) SendTradeNotification(tx model.Transaction, profit float64, closedOrders []model.Transaction, usdtBalance, bnbBalance float64) {
+func (s *TelegramService) SendTradeNotification(tx model.Transaction, profit float64, closedOrders []model.Transaction, usdtBalance, bnbBalance, btcBalance float64) {
 	var msg string
 	now := time.Now().Format("02/01/2006, 15:04:05")
 
@@ -80,7 +80,7 @@ func (s *TelegramService) SendTradeNotification(tx model.Transaction, profit flo
 		}
 
 		msg = fmt.Sprintf(
-			"🤖 Grid Trading - %s - %s\n"+
+			"🤖 Grid Trading - %s - Binance\n"+
 				"🆔 ID: %s\n"+
 				"📊 Status: %s\n"+
 				"🟢 Lado: VENDA\n"+
@@ -92,7 +92,7 @@ func (s *TelegramService) SendTradeNotification(tx model.Transaction, profit flo
 				"💰 Saldo USDT: $%.2f\n"+
 				"💰 Saldo BNB: %.4f\n"+
 				"📅 Data: %s",
-			tx.Symbol, s.Cfg.Exchange,
+			tx.Symbol,
 			escapedTxID,
 			tx.StatusTransaction,
 			amount,
@@ -107,24 +107,55 @@ func (s *TelegramService) SendTradeNotification(tx model.Transaction, profit flo
 	} else {
 		// COMPRA (Maker Fill)
 		msg = fmt.Sprintf(
-			"🤖 Grid Trading - %s - %s\n"+
+			"🤖 Grid Trading - %s - Binance\n"+
 				"🆔 ID: %s\n"+
 				"📊 Status: %s\n"+
 				"🟢 Lado: COMPRA\n"+
 				"📦 Qtd: %.6f\n"+
 				"💲 Preço: $%.2f\n"+
 				"💵 Total: $%.2f\n\n"+
+				"💰 Saldo BTC: %.6f\n"+
+				"💰 Saldo USDT: $%.2f\n"+
 				"📅 Data: %s",
-			tx.Symbol, s.Cfg.Exchange,
+			tx.Symbol,
 			escapedTxID,
 			tx.StatusTransaction,
 			amount,
 			price,
 			total,
+			btcBalance,
+			usdtBalance,
 			now,
 		)
+
 	}
 
+	s.SendMessage(msg)
+}
+
+func (s *TelegramService) SendLowBalanceAlert(currency string, currentBalance, required float64) {
+	now := time.Now().Format("02/01/2006, 15:04:05")
+	var msg string
+
+	if currency == "USDT" {
+		msg = fmt.Sprintf(
+			"⚠️ *ALERTA: Saldo USDT Baixo*\n\n"+
+				"💰 Saldo Atual: $%.2f\n"+
+				"📉 Necessário: $%.2f\n"+
+				"⚠️ O bot não conseguiu posicionar novas ordens de compra.\n\n"+
+				"📅 %s",
+			currentBalance, required, now,
+		)
+	} else {
+		msg = fmt.Sprintf(
+			"⚠️ *ALERTA: Saldo BNB Baixo*\n\n"+
+				"💰 Saldo BNB: %.4f\n"+
+				"📉 Limite Aproximado: %.4f\n"+
+				"⚠️ O saldo BNB está baixo para taxas (menos de 5%% do valor da ordem). Considere recarregar.\n\n"+
+				"📅 %s",
+			currentBalance, required, now,
+		)
+	}
 	s.SendMessage(msg)
 }
 

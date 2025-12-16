@@ -1,7 +1,6 @@
 package metrics
 
 import (
-	"strconv"
 	"time"
 
 	"grid-trading-btc-binance/internal/config"
@@ -58,15 +57,6 @@ func (t *Tracker) TrackCycle(duration time.Duration) {
 }
 
 func (t *Tracker) persistMetrics() {
-	logger.Info("Persisting metrics to .env")
-
-	err := config.UpdateEnvVariable("MS_TIME_PRODUCTION", strconv.FormatInt(t.MsTimeProd, 10))
-	if err != nil {
-		logger.Error("Failed to update MS_TIME_PRODUCTION", "error", err)
-	}
-
-	err = config.UpdateEnvVariable("TOTAL_CYCLES", strconv.FormatInt(t.TotalCycles, 10))
-	if err != nil {
-		logger.Error("Failed to update TOTAL_CYCLES", "error", err)
-	}
+	// Persistence to .env removed per user request.
+	// Metrics are now ephemeral or logged only.
 }

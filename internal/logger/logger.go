@@ -2,6 +2,7 @@ package logger
 
 import (
 	"log/slog"
+	"os"
 
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -9,8 +10,14 @@ import (
 var Log *slog.Logger
 
 func Init() {
+	// Ensure logs directory exists
+	// We're running from root usually, but let's be safe.
+	// "logs" dir validation.
+	// Note: We need to import "os"
+	_ = os.MkdirAll("logs", 0755)
+
 	fileWriter := &lumberjack.Logger{
-		Filename:   "app.log",
+		Filename:   "logs/app.log",
 		MaxSize:    10, // megabytes
 		MaxBackups: 3,
 		MaxAge:     28,   // days
