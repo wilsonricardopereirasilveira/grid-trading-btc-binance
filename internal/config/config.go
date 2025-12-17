@@ -22,6 +22,10 @@ type Config struct {
 	RangeMax        float64
 	MinOrderValue   float64
 
+	// Smart Entry Repositioning
+	SmartEntryRepositionPct      float64
+	SmartEntryRepositionCooldown int
+
 	// Metrics
 	MsTimeProduction int64
 	TotalCycles      int64
@@ -101,6 +105,27 @@ func Load() (*Config, error) {
 	cfg.MinOrderValue, err = parseFloat(os.Getenv("MIN_ORDER_VALUE"), "MIN_ORDER_VALUE")
 	if err != nil {
 		return nil, err
+	}
+
+	// Smart Entry Defaults (Optional params)
+	valRepositionPct := os.Getenv("SMART_ENTRY_REPOSITION_PCT")
+	if valRepositionPct != "" {
+		cfg.SmartEntryRepositionPct, err = parseFloat(valRepositionPct, "SMART_ENTRY_REPOSITION_PCT")
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		cfg.SmartEntryRepositionPct = 0.005
+	}
+
+	valCooldown := os.Getenv("SMART_ENTRY_REPOSITION_COOLDOWN_MIN")
+	if valCooldown != "" {
+		cfg.SmartEntryRepositionCooldown, err = parseInt(valCooldown, "SMART_ENTRY_REPOSITION_COOLDOWN_MIN")
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		cfg.SmartEntryRepositionCooldown = 5
 	}
 
 	// We no longer load metrics from .env, but we keep the struct fields for runtime usage if needed.

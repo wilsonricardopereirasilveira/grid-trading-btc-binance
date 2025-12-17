@@ -475,3 +475,38 @@ func (c *BinanceClient) CloseUserStream(listenKey string) error {
 	}
 	return nil
 }
+
+type BookTickerResponse struct {
+	Symbol   string `json:"symbol"`
+	BidPrice string `json:"bidPrice"`
+	BidQty   string `json:"bidQty"`
+	AskPrice string `json:"askPrice"`
+	AskQty   string `json:"askQty"`
+}
+
+func (c *BinanceClient) GetBookTicker(symbol string) (*BookTickerResponse, error) {
+	endpoint := "/api/v3/ticker/bookTicker"
+	reqURL := fmt.Sprintf("%s%s?symbol=%s", c.BaseURL, endpoint, symbol)
+
+	resp, err := c.Client.Get(reqURL)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read error: %w", err)
+	}
+
+	var ticker BookTickerResponse
+	if err := json.Unmarshal(body, &ticker); err != nil {
+		return nil, fmt.Errorf("unmarshal error: %w", err)
+	}
+	return &ticker, nil
+}

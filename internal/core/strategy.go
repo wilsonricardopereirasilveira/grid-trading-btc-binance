@@ -96,6 +96,7 @@ func (s *Strategy) Execute(ticker model.Ticker, bnbPrice float64) {
 
 	s.placeNewGridOrders(openOrders, filledOrders, ticker.Price, bnbPrice)
 	s.checkLowBNB(bnbPrice)
+	s.checkSmartEntryReposition(openOrders, filledOrders, ticker.Price)
 }
 
 // HandleOrderUpdate processes executionReport events from WebSocket
@@ -585,5 +586,165 @@ func (s *Strategy) checkLowBNB(bnbPrice float64) {
 		s.TelegramService.SendLowBalanceAlert("BNB", bnbBalance, thresholdBNB)
 
 		s.lastBNBAlertTime = time.Now()
+	}
+}
+
+func (s *Strategy) checkSmartEntryReposition(openOrders, filledOrders []model.Transaction, currentLastPrice float64) {
+	// 1. Zero Inventory Rule: Only reposition if we hold NO position.
+	if len(filledOrders) > 0 {
+		return
+	}
+
+	// 2. Must have Open Orders to reposition
+	if len(openOrders) == 0 {
+		return
+	}
+
+	// Find Highest Open Buy Order (Entry Candidate)
+	// Open orders are passed in. Sort them to find highest.
+	// Note: The strategy places orders, usually L1 is the highest.
+	// We want the ONE closest to price (Highest Price).
+	var highestOrder *model.Transaction
+	var highestPrice float64 = -1.0
+
+	for i := range openOrders {
+		p, _ := strconv.ParseFloat(openOrders[i].Price, 64)
+		if p > highestPrice {
+			highestPrice = p
+			highestOrder = &openOrders[i]
+		}
+	}
+
+	if highestOrder == nil {
+		return
+	}
+
+	// 3. Price Diff Check
+	// If market moves UP, Current Price > Order Price.
+	// We use Ask Price ideally, but 'currentLastPrice' is passed.
+	// Let's use currentLastPrice for the TRIGGER check as it's lighter.
+	// Or should we fetch BookTicker here?
+	// The user wants reliable check. "market moves up".
+	// using LastPrice is fine.
+
+	if s.Cfg.SmartEntryRepositionPct <= 0 {
+		return // Feature disabled
+	}
+
+	diffPct := (currentLastPrice - highestPrice) / highestPrice
+
+	// If diff is NOT enough, return
+	if diffPct < s.Cfg.SmartEntryRepositionPct {
+		return
+	}
+
+	// 4. Cooldown Check
+	cooldown := time.Duration(s.Cfg.SmartEntryRepositionCooldown) * time.Minute
+	if time.Since(highestOrder.CreatedAt) < cooldown {
+		// Not enough time passed
+		return
+	}
+
+	logger.Info("⚡ Smart Entry Reposition Triggered",
+		"orderPrice", highestPrice,
+		"currentPrice", currentLastPrice,
+		"diffPct", fmt.Sprintf("%.4f%%", diffPct*100),
+		"orderID", highestOrder.ID,
+	)
+
+	// Fetch Real-time Book Ticker for Limit Maker Placement
+	book, err := s.Binance.GetBookTicker(s.Cfg.Symbol)
+	if err != nil {
+		logger.Error("❌ Failed to get BookTicker for repositioning", "error", err)
+		return
+	}
+
+	newPriceStr := book.BidPrice
+	newPrice, _ := strconv.ParseFloat(newPriceStr, 64)
+
+	// Safety: Ensure newPrice is actually higher than old price?
+	// Usually yes if diffPct is positive.
+
+	// 5. Execute Reposition
+
+	// A) Cancel Old Order
+	_, err = s.Binance.CancelOrder(s.Cfg.Symbol, highestOrder.ID)
+	if err != nil {
+		logger.Error("⚠️ Failed to cancel old order for reposition", "orderID", highestOrder.ID, "error", err)
+		// If failed (e.g. already filled), we stop.
+		// Check if it was filled?
+		return
+	}
+
+	// B) Update Old Order in Repo
+	highestOrder.StatusTransaction = "closed"
+	highestOrder.Notes += " | Repositioned (Smart Entry)"
+	if err := s.TransactionRepo.Update(*highestOrder); err != nil {
+		logger.Error("Failed to update repositioned order", "error", err)
+	}
+
+	// C) Create New Order at CurrentBid (Maker Attempt)
+	// Reuse quantity/value logic?
+	// Use same quantity as old order? Or recalculate based on current balance?
+	// If we use same quantity, we preserve "Entry Size".
+	// If we recalculate, we fit valid size.
+	// Let's use the AMOUNT of the old order to be consistent?
+	// Or better: Recalculate based on Config PositionSizePct, as price changed.
+	// Let's Recalculate to be safe with MinOrderValue etc.
+
+	saldoUSDT := s.getBalance("USDT")
+	orderValue := s.calculateOrderValue(saldoUSDT)
+
+	// Logic from placeNewGridOrders
+	if saldoUSDT < orderValue {
+		logger.Warn("Insufficient funds for Reposition", "needed", orderValue, "have", saldoUSDT)
+		return
+	}
+
+	buyQty := orderValue / newPrice
+	qtyStr := fmt.Sprintf("%.5f", buyQty) // Fixed precision for BTC (TODO: Dynamic prec)
+
+	newClientOrderID := fmt.Sprintf("BUY_R_%d", time.Now().UnixMilli())
+
+	req := api.OrderRequest{
+		Symbol:           s.Cfg.Symbol,
+		Side:             "BUY",
+		Type:             "LIMIT",
+		TimeInForce:      "GTC",
+		Quantity:         qtyStr,
+		Price:            newPriceStr,
+		NewClientOrderID: newClientOrderID,
+	}
+
+	logger.Info("🔄 Placing Reposition Order (Maker Attempt)", "price", newPriceStr, "qty", qtyStr)
+
+	resp, err := s.Binance.CreateOrder(req)
+	if err != nil {
+		logger.Error("❌ Failed to create Reposition Order", "error", err)
+		return
+	}
+
+	logger.Info("✅ Reposition Order Placed", "orderID", resp.OrderId)
+
+	// D) Save New Transaction
+	newTx := model.Transaction{
+		ID:                resp.ClientOrderId,
+		TransactionID:     resp.ClientOrderId,
+		Symbol:            s.Cfg.Symbol,
+		Type:              "buy",
+		Amount:            resp.OrigQty,
+		Price:             resp.Price,
+		StatusTransaction: "open",
+		Notes:             "Smart Entry Reposition",
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
+	}
+
+	if resp.Status == "FILLED" {
+		newTx.StatusTransaction = "filled"
+	}
+
+	if err := s.TransactionRepo.Save(newTx); err != nil {
+		logger.Error("Failed to save new reposition transaction", "error", err)
 	}
 }

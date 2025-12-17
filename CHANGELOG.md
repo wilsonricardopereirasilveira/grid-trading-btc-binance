@@ -1,8 +1,16 @@
 # Changelog
 
-## [Unreleased]
+## 2025-12-16
+### Adicionado
+- **Smart Entry Repositioning (Perseguição de Entrada)**:
+    - Feature que reposiciona automaticamente a ordem de entrada (L1) se o mercado subir mais que X% (`SMART_ENTRY_REPOSITION_PCT`) e a ordem ficar "abandonada" por Y minutos (`SMART_ENTRY_REPOSITION_COOLDOWN_MIN`).
+    - **Proteções**: 
+        - **Zero Inventory Only**: Só ativa se o bot não tiver nenhuma posição em aberto (somente para entrar no mercado).
+        - **Maker Priority**: A nova ordem é posicionada no `CurrentBid` para tentar execução Maker e economizar taxas.
+    - **Configuração**: Adicionadas novas variáveis ao `.env`: `SMART_ENTRY_REPOSITION_PCT` e `SMART_ENTRY_REPOSITION_COOLDOWN_MIN`.
 
-## [1.0.1] - 2025-12-15
+
+## 2025-12-15
 ### Melhorias
 - **Análise de Estratégia (CSV)**:
     - **Agendamento**: Geração do CSV ajustada para sempre ocorrer na "hora cheia" (00min:00seg), facilitando a leitura temporal.
@@ -12,7 +20,7 @@
         - `open_orders_count`: Indicador de saturação do grid (0 = Ocioso, Alto = Travado).
         - `range_utilization_pct`: Medidor de risco mostrando a posição do preço dentro do Range configurado (0-100%).
 
-## [1.0.0] - 2025-12-15
+## 2025-12-15
 ### Adicionado
 - **Produção**: Estratégia migrada oficialmente de Paper Trading para Produção.
 - **Dimensionamento Dinâmico de Ordens**:
@@ -25,6 +33,6 @@
 - **Logs**:
     - Logs movidos da raiz para a pasta `logs/` para melhor organização.
 
-## [0.9.0] - 2025-12-13
+## 2025-12-13
 ### Adicionado
 - **Paper Trading**: Estratégia de Grid Trading (Bitcoin/Binance) funcionando em ambiente de simulação/testes.

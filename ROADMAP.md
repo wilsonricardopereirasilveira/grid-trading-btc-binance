@@ -26,6 +26,10 @@
   - **O que é**: Quando falhar por saldo insuficiente, registrar isso estruturadamente no CSV ou num log específico (ex: missed_orders.log).
   - **Por que**: Para você saber, no fim do mês, quanto dinheiro deixou de ganhar por falta de banca e ajustar o aporte.
 
+- [ ] **Notificações Assíncronas (Worker de Telegram)**
+  - **O que é**: Mover a lógica de notificações via Telegram para uma goroutine separada (worker) que verifica as últimas ordens a cada minuto.
+  - **Por que**: Remove o IO bloqueante do Telegram da thread principal de trading, garantindo execução mais rápida e estável.
+
 ## 🟡 Prioridade P2: Médio (Observabilidade e UX)
 **Foco**: Melhorar a visão do que está acontecendo sem ler logs brutos.
 
