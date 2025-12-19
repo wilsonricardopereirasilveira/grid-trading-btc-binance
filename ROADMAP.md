@@ -7,9 +7,9 @@
   - **O que é**: Implementar uma lógica simples de "tente de novo" se o envio da mensagem falhar (erro de net/timeout).
   - **Por que**: Atualmente, se a internet piscar no segundo do alerta de "Saldo Baixo", você nunca fica sabendo.
 
-- [ ] **Flag PAUSE_BUYS (Botão de Pânico Suave)**
-  - **O que é**: Ler uma variável de ambiente (ou arquivo .env) a cada ciclo. Se PAUSE_BUYS=true, o bot pula a função de criar novas ordens, mas mantém a verificação de vendas (Take Profit).
-  - **Por que**: Permite que você pare de aumentar a exposição ao risco sem desligar o bot (que mataria a saída de lucro).
+- [ ] **Organização de Arquivos (Seu item)**
+  - **O que é**: Definir um diretório fixo (ex: /data/) para transactions.json e logs, separando código de dados.
+  - **Por que**: Facilita backups e evita deletar o "cérebro" do bot num deploy acidental.
 
 - [ ] **Organização de Arquivos (Seu item)**
   - **O que é**: Definir um diretório fixo (ex: /data/) para transactions.json e logs, separando código de dados.

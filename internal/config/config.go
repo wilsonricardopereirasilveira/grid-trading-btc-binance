@@ -37,6 +37,12 @@ type Config struct {
 	// Telegram
 	TelegramToken  string
 	TelegramChatID string
+
+	// Crash Protection
+	CrashProtectionEnabled bool
+	MaxDropPct5m           float64
+	CrashPauseMin          int
+	PauseBuys              bool
 }
 
 func Load() (*Config, error) {
@@ -139,6 +145,39 @@ func Load() (*Config, error) {
 
 	cfg.TelegramToken = os.Getenv("TELEGRAM_TOKEN")
 	cfg.TelegramChatID = os.Getenv("TELEGRAM_CHAT_ID")
+
+	// Crash Protection Defaults
+	cfg.CrashProtectionEnabled = true
+	if val := os.Getenv("CRASH_PROTECTION_ENABLED"); val == "false" {
+		cfg.CrashProtectionEnabled = false
+	}
+
+	valMaxDrop := os.Getenv("MAX_DROP_PCT_5M")
+	if valMaxDrop != "" {
+		cfg.MaxDropPct5m, err = parseFloat(valMaxDrop, "MAX_DROP_PCT_5M")
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		cfg.MaxDropPct5m = 0.02 // 2% default
+	}
+
+	valCrashPause := os.Getenv("CRASH_PAUSE_MIN")
+	if valCrashPause != "" {
+		cfg.CrashPauseMin, err = parseInt(valCrashPause, "CRASH_PAUSE_MIN")
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		cfg.CrashPauseMin = 15 // 15 min default
+	}
+
+	// Soft Panic Button
+	if val := os.Getenv("PAUSE_BUYS"); val == "true" {
+		cfg.PauseBuys = true
+	} else {
+		cfg.PauseBuys = false
+	}
 
 	return cfg, nil
 }

@@ -19,7 +19,9 @@ type Bot struct {
 	Strategy          *Strategy
 	DataCollector     *service.DataCollector
 
-	lastBNBPrice float64
+	lastBNBPrice     float64
+	lastLoggedPrice  float64
+	lastPriceLogTime time.Time
 }
 
 func NewBot(cfg *config.Config, balanceRepo *repository.BalanceRepository, transactionRepo *repository.TransactionRepository, marketDataService *service.MarketDataService, strategy *Strategy, dataCollector *service.DataCollector) *Bot {
@@ -76,7 +78,28 @@ func (b *Bot) Run() {
 		select {
 		case ticker := <-updates:
 			start := time.Now()
-			logger.Info("Received price update", "symbol", ticker.Symbol, "price", ticker.Price)
+			// Smart Logging for Price Update
+			shouldLog := false
+			if ticker.Symbol == b.Cfg.Symbol {
+				priceChange := 0.0
+				if b.lastLoggedPrice > 0 {
+					priceChange = (ticker.Price - b.lastLoggedPrice) / b.lastLoggedPrice
+					if priceChange < 0 {
+						priceChange = -priceChange
+					}
+				}
+
+				// Log if > 10s passed OR price changed > 0.5%
+				if time.Since(b.lastPriceLogTime) > 10*time.Second || priceChange > 0.005 {
+					shouldLog = true
+					b.lastPriceLogTime = time.Now()
+					b.lastLoggedPrice = ticker.Price
+				}
+			}
+
+			if shouldLog {
+				logger.Info("Received price update", "symbol", ticker.Symbol, "price", ticker.Price)
+			}
 
 			if ticker.Symbol == "BNBUSDT" {
 				b.lastBNBPrice = ticker.Price

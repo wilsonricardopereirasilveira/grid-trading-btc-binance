@@ -1,5 +1,19 @@
 # Changelog
 
+## 2025-12-18
+### Adicionado
+- **Refatoração de Logging (Smart Observability)**:
+    - **Throttling de Preço**: Log de "Price Update" reduzido para cada 10 segundos (exceto se houver variação > 0.5%).
+    - **Monitor de Peso de API (Binance)**: Implementada lógica inteligente que avisa a cada 100 pontos de consumo ou em níveis de alerta/crítico, removendo ruído de logs DEBUG.
+- **Volatility Circuit Breaker (Proteção Anti-Crash)**:
+    - Mecanismo P0 que bloqueia novas compras se detectar queda brusca no mercado (ex: > 2% em 5 min).
+    - **Lógica Fail-Safe**: Se a API da Binance falhar ao buscar dados, o bot assume insegurança e pausa compras.
+    - **Cooldown**: Pausa automática de 15 minutos (configurável) até a estabilização.
+    - **Configuração**: Novas vars `CRASH_PROTECTION_ENABLED`, `MAX_DROP_PCT_5M`, e `CRASH_PAUSE_MIN`.
+- **Soft Panic Button (PAUSE_BUYS)**:
+    - Nova flag configurável `PAUSE_BUYS` no `.env`.
+    - Quando ativada (`true`), o bot ignora novas entradas (compras) mas mantém o gerenciamento de saídas (vendas/Take Profit), permitindo reduzir exposição sem desligar o bot.
+
 ## 2025-12-16
 ### Adicionado
 - **Smart Entry Repositioning (Perseguição de Entrada)**:

@@ -15,14 +15,15 @@ import (
 )
 
 type Strategy struct {
-	Cfg               *config.Config
-	BalanceRepo       *repository.BalanceRepository
-	TransactionRepo   *repository.TransactionRepository
-	TelegramService   *service.TelegramService
-	Binance           *api.BinanceClient
-	lastFillCheck     time.Time
-	lastUSDTAlertTime time.Time
-	lastBNBAlertTime  time.Time
+	Cfg                       *config.Config
+	BalanceRepo               *repository.BalanceRepository
+	TransactionRepo           *repository.TransactionRepository
+	TelegramService           *service.TelegramService
+	Binance                   *api.BinanceClient
+	lastFillCheck             time.Time
+	lastUSDTAlertTime         time.Time
+	lastBNBAlertTime          time.Time
+	circuitBreakerTriggeredAt time.Time
 }
 
 func NewStrategy(cfg *config.Config, balanceRepo *repository.BalanceRepository, transactionRepo *repository.TransactionRepository, telegramService *service.TelegramService, binanceClient *api.BinanceClient) *Strategy {
@@ -79,7 +80,18 @@ func (s *Strategy) Execute(ticker model.Ticker, bnbPrice float64) {
 		return // If we sold everything, we wait for next cycle to maybe buy again
 	}
 
-	// 4. Place New Grid Orders (Maker)
+	// 5. Volatility Circuit Breaker (Crash Protection)
+	if !s.isMarketSafe(ticker.Price) {
+		return // Block new entries
+	}
+
+	// 5.5. Soft Panic Button (Pause Buys)
+	if s.Cfg.PauseBuys {
+		logger.Warn("⚠️ PAUSE_BUYS está ATIVO. Pulando criação de novas ordens de compra.")
+		return // Block new entries
+	}
+
+	// 6. Place New Grid Orders (Maker)
 	// Re-fetch open/filled to be sure
 	transactions = s.TransactionRepo.GetAll()
 	openOrders = []model.Transaction{}
@@ -747,4 +759,82 @@ func (s *Strategy) checkSmartEntryReposition(openOrders, filledOrders []model.Tr
 	if err := s.TransactionRepo.Save(newTx); err != nil {
 		logger.Error("Failed to save new reposition transaction", "error", err)
 	}
+}
+
+func (s *Strategy) isMarketSafe(currentPrice float64) bool {
+	// Check if feature is enabled
+	if !s.Cfg.CrashProtectionEnabled {
+		return true
+	}
+
+	// 1. Fail-Safe / Paranoia Mode
+	// We fetch 3 candles of 5m (15m history)
+	klines, err := s.Binance.GetRecentKlines(s.Cfg.Symbol, "5m", 3)
+	if err != nil {
+		logger.Error("🚨 CRITICAL: Failed to fetch Klines for Safety Check. BLOCKING TRADES.", "error", err)
+		return false // Block
+	}
+
+	if len(klines) == 0 {
+		logger.Error("🚨 CRITICAL: No Klines returned. BLOCKING TRADES.")
+		return false
+	}
+
+	// 2. Calculate Drop
+	var maxHigh float64
+	for _, k := range klines {
+		h, _ := strconv.ParseFloat(k.High, 64)
+		if h > maxHigh {
+			maxHigh = h
+		}
+	}
+
+	if maxHigh <= 0 {
+		return false // Safe guard
+	}
+
+	dropPct := (maxHigh - currentPrice) / maxHigh
+
+	// 3. Cooldown Logic
+	if !s.circuitBreakerTriggeredAt.IsZero() {
+		pauseDuration := time.Duration(s.Cfg.CrashPauseMin) * time.Minute
+		if time.Since(s.circuitBreakerTriggeredAt) < pauseDuration {
+			// Still in cooldown
+			return false
+		}
+
+		// Cooldown passed. Check if safe NOW.
+		if dropPct < s.Cfg.MaxDropPct5m {
+			// Normalized.
+			logger.Info("✅ Circuit Breaker Normalizado. Resuming trades.")
+			s.circuitBreakerTriggeredAt = time.Time{} // Reset
+			s.TelegramService.SendMessage("✅ *Circuit Breaker Normalizado*\nVolatilidade controlada. Retomando operações.")
+			return true
+		} else {
+			// Still volatile. Extend.
+			logger.Warn("⚠️ Market still volatile after cooldown. Extending pause.", "drop", fmt.Sprintf("%.2f%%", dropPct*100))
+			s.circuitBreakerTriggeredAt = time.Now()
+			return false
+		}
+	}
+
+	// 4. Trigger Logic
+	if dropPct > s.Cfg.MaxDropPct5m {
+		s.circuitBreakerTriggeredAt = time.Now()
+		logger.Warn("⚠️ CRASH DETECTED. Circuit Breaker Triggered.",
+			"drop", fmt.Sprintf("%.2f%%", dropPct*100),
+			"threshold", fmt.Sprintf("%.2f%%", s.Cfg.MaxDropPct5m*100),
+			"maxHigh", maxHigh,
+			"current", currentPrice,
+		)
+
+		msg := fmt.Sprintf("⚠️ *ALERTA: Circuit Breaker Ativado!* ⚠️\n\nQueda detectada: %.2f%%\nPreço Atual: %.2f\nMax (15m): %.2f\n\n⛔ *Compras Pausadas por %d min.*",
+			dropPct*100, currentPrice, maxHigh, s.Cfg.CrashPauseMin)
+
+		s.TelegramService.SendMessage(msg)
+
+		return false
+	}
+
+	return true
 }
