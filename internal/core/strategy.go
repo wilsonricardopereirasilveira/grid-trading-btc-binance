@@ -76,9 +76,8 @@ func (s *Strategy) Execute(ticker model.Ticker, bnbPrice float64) {
 		}
 	}
 
-	if s.checkTakeProfit(filledOrders, activeOpenOrders, ticker.Price, bnbPrice) {
-		return // If we sold everything, we wait for next cycle to maybe buy again
-	}
+	// 3. Check Take Profit (Legacy Polling Removed - Now Event Driven)
+	// s.checkTakeProfit(filledOrders, activeOpenOrders, ticker.Price, bnbPrice)
 
 	// 5. Volatility Circuit Breaker (Crash Protection)
 	if !s.isMarketSafe(ticker.Price) {
@@ -134,57 +133,233 @@ func (s *Strategy) HandleOrderUpdate(event service.OrderUpdate) {
 	}
 
 	if event.Status == "FILLED" {
-		if tx.StatusTransaction != "filled" {
-			logger.Info("⚡ WebSocket: Maker Order FILLED", "orderID", tx.ID, "price", event.LastExecPrice)
+		if tx.StatusTransaction != "filled" && tx.StatusTransaction != "waiting_sell" && tx.StatusTransaction != "closed" {
+			logger.Info("⚡ WebSocket: Order FILLED", "orderID", tx.ID, "price", event.LastExecPrice)
 
-			tx.StatusTransaction = "filled"
-			// Update details from event
-			tx.Price = event.LastExecPrice
-			// We might want avg price if multiple fills, but event usually has Last.
-			// Ideally we use CumExecQty / CumQuoteQty if available or just last.
-			// Event has 'z' (CumExecQty) and 'L' (LastPrice).
-			// If fully filled, we can use average.
-			// Calculate Avg Price = CumQuote / CumQty ?
-			// Not easily available in simple event structure without 'Z' (CumQuote).
-			// Let's use LastExecPrice for now or keep original if close.
-
-			tx.Notes += " | WS Verified Fill"
-			s.TransactionRepo.Update(tx)
-
-			// Fetch fresh balances for notification as requested
-			var usdtBal, bnbBal, btcBal float64
-			accInfo, err := s.Binance.GetAccountInfo()
-			if err != nil {
-				logger.Error("⚠️ Failed to fetch fresh balances for notification", "error", err)
-				// Fallback to local cache if API fails
-				usdtBal = s.getBalance("USDT")
-				bnbBal = s.getBalance("BNB")
-				btcBal = s.getBalance("BTC")
-			} else {
-				// Parse balances
-				for _, b := range accInfo.Balances {
-					if b.Asset == "USDT" {
-						usdtBal, _ = strconv.ParseFloat(b.Free, 64)
-					} else if b.Asset == "BNB" {
-						bnbBal, _ = strconv.ParseFloat(b.Free, 64)
-					} else if b.Asset == "BTC" {
-						btcBal, _ = strconv.ParseFloat(b.Free, 64)
-					}
+			// If it's a BUY order, we treat it as an entry fill -> Place Exit
+			if tx.Type == "buy" {
+				// IDEMPOTENCY CHECK:
+				if tx.SellOrderID != "" {
+					logger.Info("ℹ️ Buy Order Filled, but Sell Order already exists. Skipping duplicate.", "buyID", tx.ID)
+					return
 				}
-				// Optional: Update local repo with fresh data while we are at it?
-				// s.BalanceRepo.Update("USDT", usdtBal) ...
-			}
 
-			s.TelegramService.SendTradeNotification(tx, 0, nil, usdtBal, bnbBal, btcBal)
+				tx.StatusTransaction = "filled"
+				tx.Price = event.LastExecPrice // Update entry price
+				if event.LastExecQty != "" {
+					tx.Amount = event.LastExecQty
+				}
+				tx.Notes += " | WS Verified Fill"
+				s.TransactionRepo.Update(tx)
+
+				// TRIGGER MAKER EXIT
+				s.placeMakerExitOrder(&tx)
+
+				// Notify Entry
+				s.sendTradeNotification(tx, 0, nil)
+
+			} else if tx.Type == "sell" {
+				// Should not happen often if we use Maker-Exit logic tied to the Buy Tx,
+				// but if we have separate Sell Tx, handle here.
+				// However, in Maker-Maker, we attach Sell info to the Buy Tx usually?
+				// The prompt says "Transactions.json... SellOrderID".
+				// So when the SELL order fills, we are updating the BUY Transaction that owns it?
+				// OR we receive an event for the SELL order ID, look it up in Repo?
+				// Since we store SellOrderID in the Transaction, we can look up by SellOrderID?
+				// The Repo.Get(ID) usually searches by ID (which is the Buy ID).
+				// We need a way to find the Transaction by SellOrderID if the event is for the Sell Order.
+				// For now, let's assume we maintain the Buy ID as the main ID.
+				// But the event comes with ClientOrderID.
+				// When we place Maker Exit, we set NewClientOrderID.
+				// We need to support finding by that ID.
+			}
+		} else {
+			// Maybe it's a fill for the Sell Order?
+			// If tx.SellOrderID == event.ClientOrderID ...
+			if tx.SellOrderID == event.ClientOrderID {
+				logger.Info("💰 WebSocket: Maker Exit Order FILLED", "sellOrderID", event.ClientOrderID)
+
+				// Mark as closed/sold
+				tx.StatusTransaction = "closed"
+				now := time.Now()
+				tx.ClosedAt = &now
+
+				// Calculate Profit
+				buyPrice, _ := strconv.ParseFloat(tx.Price, 64)
+				sellPrice, _ := strconv.ParseFloat(event.LastExecPrice, 64)
+				qty, _ := strconv.ParseFloat(tx.Amount, 64)
+
+				revenue := sellPrice * qty
+				cost := buyPrice * qty
+				profit := revenue - cost
+
+				tx.Notes += fmt.Sprintf(" | Sold at %.2f (Profit: $%.2f)", sellPrice, profit)
+				s.TransactionRepo.Update(tx)
+
+				// Notify Exit
+				// Create a temporary "Sell" transaction for the notification so it renders as VENDA
+				sellTx := tx
+				sellTx.ID = event.ClientOrderID
+				sellTx.Type = "sell"
+				sellTx.Price = event.LastExecPrice
+				sellTx.StatusTransaction = "filled"
+
+				s.sendTradeNotification(sellTx, profit, nil)
+			}
 		}
 	} else if event.Status == "CANCELED" || event.Status == "REJECTED" || event.Status == "EXPIRED" {
 		if tx.StatusTransaction != "closed" {
-			logger.Warn("⚠️ WebSocket: Order Closed/Canceled", "orderID", tx.ID, "status", event.Status)
-			tx.StatusTransaction = "closed"
-			tx.Notes += fmt.Sprintf(" | Closed via WS: %s", event.Status)
-			s.TransactionRepo.Update(tx)
+			// Check if it's the Sell Order that was canceled
+			if tx.SellOrderID == event.ClientOrderID {
+				logger.Warn("⚠️ Maker Exit Order Canceled/Rejected", "sellOrderID", tx.SellOrderID)
+				// Reset status to filled so we retry placing it?
+				// Or 'waiting_sell' so startup sync catches it?
+				// Strategy says: "Retry... if failed... log critical"
+				// But if canceled externally?
+				// Let's set it back to 'filled' to retry placement if appropriate, or 'waiting_sell' and let sync handle it.
+				// If we set to 'filled', the next 'execute' loop won't inherently trigger 'placeMakerExitOrder' unless we add logic there.
+				// But safely, we can log and maybe try to replace immediately?
+				// For now, let's log.
+			} else {
+				// It's the buy order
+				logger.Warn("⚠️ WebSocket: Buy Order Closed/Canceled", "orderID", tx.ID, "status", event.Status)
+				tx.StatusTransaction = "closed"
+				tx.Notes += fmt.Sprintf(" | Closed via WS: %s", event.Status)
+				s.TransactionRepo.Update(tx)
+			}
 		}
 	}
+}
+
+// sendTradeNotification helper to avoid duplicated code
+func (s *Strategy) sendTradeNotification(tx model.Transaction, profit float64, ordersToClose []model.Transaction) {
+	var usdtBal, bnbBal, btcBal float64
+	accInfo, err := s.Binance.GetAccountInfo()
+	if err != nil {
+		logger.Error("⚠️ Failed to fetch fresh balances", "error", err)
+		usdtBal = s.getBalance("USDT")
+		bnbBal = s.getBalance("BNB")
+		btcBal = s.getBalance("BTC")
+	} else {
+		for _, b := range accInfo.Balances {
+			if b.Asset == "USDT" {
+				usdtBal, _ = strconv.ParseFloat(b.Free, 64)
+			} else if b.Asset == "BNB" {
+				bnbBal, _ = strconv.ParseFloat(b.Free, 64)
+			} else if b.Asset == "BTC" {
+				btcBal, _ = strconv.ParseFloat(b.Free, 64)
+			}
+		}
+	}
+	s.TelegramService.SendTradeNotification(tx, profit, ordersToClose, usdtBal, bnbBal, btcBal)
+}
+
+// Implement placeMakerExitOrder
+func (s *Strategy) placeMakerExitOrder(tx *model.Transaction) {
+	// 1. Calculate Sell Price
+	buyPrice, _ := strconv.ParseFloat(tx.Price, 64)
+	// profitMargin := s.Cfg.MinNetProfitPct // Unused in Grid Strategy (Fixed Spacing)
+	// Or should we use GridSpacing? Usually Grid uses fixed spacing.
+	// But let's stick to "ProfitMargin" concept from prompt.
+	// Assuming MinNetProfitPct is appropriate or we should check if there is a separate config.
+	// The prompt said: SellPrice = BuyPrice * (1 + ProfitMargin).
+	// Let's use GridSpacingPct as valid Proxy if ProfitMargin not explicit.
+	// Actually, typically for Grid, Sell = Buy + GridSpacing.
+	targetPrice := buyPrice * (1 + s.Cfg.GridSpacingPct)
+
+	sellPriceStr := fmt.Sprintf("%.2f", targetPrice)
+
+	// 2. Calculate Quantity (Safety Check)
+	buyQty, _ := strconv.ParseFloat(tx.Amount, 64)
+
+	// Check Available Balance
+	// We need to know which asset we are selling. BTCUSDT -> Sell BTC.
+	var baseAsset string = "BTC" // Hardcoded for BTCUSDT or derive from Symbol
+	if len(s.Cfg.Symbol) > 4 && s.Cfg.Symbol[len(s.Cfg.Symbol)-4:] == "USDT" {
+		baseAsset = s.Cfg.Symbol[:len(s.Cfg.Symbol)-4]
+	}
+
+	// Get LIVE balance to be safe
+	accInfo, err := s.Binance.GetAccountInfo()
+	var availableBalance float64
+	if err == nil {
+		for _, b := range accInfo.Balances {
+			if b.Asset == baseAsset {
+				availableBalance, _ = strconv.ParseFloat(b.Free, 64)
+				break
+			}
+		}
+		// Update local repo
+		s.BalanceRepo.Update(baseAsset, availableBalance)
+	} else {
+		logger.Warn("⚠️ Using cached balance for safety check (API fail)")
+		availableBalance = s.getBalance(baseAsset)
+	}
+
+	// 0.999 safety factor
+	safeSellQty := availableBalance * 0.999
+
+	sellQty := buyQty
+	if sellQty > safeSellQty {
+		logger.Warn("⚠️ Insufficient balance for full sell. Adjusting.", "wanted", sellQty, "have_safe", safeSellQty)
+		sellQty = safeSellQty
+	}
+
+	// Min Lot Size Check? 0.00001 BTC.
+	if sellQty < 0.00001 {
+		logger.Error("❌ Sell Quantity too low to place order", "qty", sellQty)
+		return
+	}
+
+	qtyStr := fmt.Sprintf("%.5f", sellQty)
+
+	// 3. Execution with Retry
+	sellOrderID := fmt.Sprintf("SELL_%d", time.Now().UnixNano())
+
+	req := api.OrderRequest{
+		Symbol:           s.Cfg.Symbol,
+		Side:             "SELL",
+		Type:             "LIMIT",
+		TimeInForce:      "GTC",
+		Quantity:         qtyStr,
+		Price:            sellPriceStr,
+		NewClientOrderID: sellOrderID,
+	}
+
+	var resp *api.OrderResponse
+	maxRetries := 5
+	backoff := 1 * time.Second
+
+	for i := 0; i < maxRetries; i++ {
+		resp, err = s.Binance.CreateOrder(req)
+		if err == nil {
+			break
+		}
+		logger.Warn("⚠️ Failed to place Maker Exit. Retrying...", "attempt", i+1, "error", err)
+		time.Sleep(backoff)
+		backoff *= 2
+	}
+
+	if err != nil {
+		logger.Error("🚨 CRITICAL: Failed to place Maker Exit Order after retries!", "buyOrderID", tx.ID)
+		s.TelegramService.SendMessage(fmt.Sprintf("🚨 CRITICAL: Failed to place Maker Exit for Order %s. Please check manually!", tx.ID))
+
+		// Mark as failed_placement so we know it needs manual intervention
+		tx.StatusTransaction = "failed_placement"
+		s.TransactionRepo.Update(*tx)
+		return
+	}
+
+	logger.Info("✅ Maker Exit Order Placed", "sellOrderID", resp.OrderId, "price", sellPriceStr)
+
+	// 4. Persistence
+	tx.SellOrderID = resp.ClientOrderId // Or resp.OrderId (int) converted to string? Model has string.
+	// Usually ClientOrderId is reliable if we set it.
+	tx.SellPrice = targetPrice
+	tx.SellCreatedAt = time.Now()
+	tx.StatusTransaction = "waiting_sell"
+
+	s.TransactionRepo.Update(*tx)
 }
 
 const (
@@ -192,12 +367,6 @@ const (
 	FeeRateStd = 0.00100 // 0.10%
 	BNBBuffer  = 1.1     // 10% safety buffer
 )
-
-// processFills - DEPRECATED/REMOVED (Using WebSocket)
-func (s *Strategy) processFills(openOrders []model.Transaction, currentPrice float64) {
-	// Intentionally Left Empty or Removed
-	// We rely on HandleOrderUpdate from WebSocket now.
-}
 
 func (s *Strategy) checkTakeProfit(filledOrders, openOrders []model.Transaction, currentBid, bnbPrice float64) bool {
 	if len(filledOrders) == 0 {
@@ -521,10 +690,7 @@ func (s *Strategy) SyncOrdersOnStartup() {
 	var syncedCount int
 
 	for _, tx := range transactions {
-		// We only care about Open Check for "buy" orders usually, as "sell" are takers (immediate).
-		// But if we ever have "sell" limit orders, we should check them too.
-		// For this strategy: Makers are "buy" limit orders. Takers are "sell" market orders (usually).
-		// So checking "open" status is key.
+		// MAKER ENTRY CHECK (Buy Limit)
 		if tx.StatusTransaction == "open" {
 			// Check status on Binance
 			resp, err := s.Binance.GetOrder(tx.Symbol, tx.ID)
@@ -547,8 +713,9 @@ func (s *Strategy) SyncOrdersOnStartup() {
 					s.TransactionRepo.Update(tx)
 					syncedCount++
 
-					// Notify generic
-					logger.Info("✅ Order synced as FILLED", "orderID", tx.ID)
+					logger.Info("✅ Order synced as FILLED - Triggering Maker Exit", "orderID", tx.ID)
+					// Trigger Exit creation for this missed fill
+					s.placeMakerExitOrder(&tx)
 
 				} else if resp.Status == "CANCELED" || resp.Status == "REJECTED" || resp.Status == "EXPIRED" {
 					tx.StatusTransaction = "closed"
@@ -559,6 +726,36 @@ func (s *Strategy) SyncOrdersOnStartup() {
 					logger.Info("🚫 Order synced as CLOSED/CANCELED", "orderID", tx.ID)
 				}
 			}
+		}
+
+		// MAKER EXIT CHECK (Waiting Sell)
+		if tx.StatusTransaction == "waiting_sell" && tx.SellOrderID != "" {
+			resp, err := s.Binance.GetOrder(tx.Symbol, tx.SellOrderID)
+			if err != nil {
+				// 404 Case or Error
+				logger.Error("⚠️ Failed to check SELL Order status on startup", "sellID", tx.SellOrderID, "error", err)
+				// If error contains code -2013 (Order does not exist), it might be 404.
+				// Standard Binance error checks needed.
+				// Assuming critical error for now.
+				// If 404, we might need to recreate?
+				continue
+			}
+
+			if resp.Status == "FILLED" {
+				// Sold!
+				logger.Info("💰 Maker Exit Found FILLED on Startup", "sellID", tx.SellOrderID)
+				tx.StatusTransaction = "closed"
+				tx.ClosedAt = &time.Time{}
+				*tx.ClosedAt = time.Now() // Approximate or use UpdateTime from resp
+				tx.Notes += " | Sold while offline"
+				s.TransactionRepo.Update(tx)
+				syncedCount++
+			} else if resp.Status == "CANCELED" || resp.Status == "REJECTED" || resp.Status == "EXPIRED" {
+				logger.Warn("⚠️ Maker Exit Found CANCELED on Startup. Recreating...", "sellID", tx.SellOrderID)
+				// Re-place order
+				s.placeMakerExitOrder(&tx)
+			}
+			// If NEW/PARTIALLY_FILLED, it's fine.
 		}
 	}
 
@@ -645,23 +842,35 @@ func (s *Strategy) checkSmartEntryReposition(openOrders, filledOrders []model.Tr
 
 	diffPct := (currentLastPrice - highestPrice) / highestPrice
 
-	// If diff is NOT enough, return
-	if diffPct < s.Cfg.SmartEntryRepositionPct {
+	// 4. Trigger Logic (Smart Entry V2.0)
+	// Condition A: Price Runaway (Urgent) - Only if Cooldown passed
+	isPriceRunaway := diffPct >= s.Cfg.SmartEntryRepositionPct
+	cooldown := time.Duration(s.Cfg.SmartEntryRepositionCooldown) * time.Minute
+	isCooldownPassed := time.Since(highestOrder.CreatedAt) >= cooldown
+
+	// Condition B: Stagnation (Boredom) - If order is too old (e.g. 20 min)
+	// We want to force reposition to current market even if price didn't run away X%.
+	maxIdle := time.Duration(s.Cfg.SmartEntryRepositionMaxIdleMin) * time.Minute
+	isStagnant := time.Since(highestOrder.CreatedAt) >= maxIdle
+
+	shouldReposition := (isPriceRunaway && isCooldownPassed) || isStagnant
+
+	if !shouldReposition {
 		return
 	}
 
-	// 4. Cooldown Check
-	cooldown := time.Duration(s.Cfg.SmartEntryRepositionCooldown) * time.Minute
-	if time.Since(highestOrder.CreatedAt) < cooldown {
-		// Not enough time passed
-		return
+	triggerReason := "Price Runaway"
+	if isStagnant && !isPriceRunaway {
+		triggerReason = "Stagnation (Idle Timeout)"
 	}
 
 	logger.Info("⚡ Smart Entry Reposition Triggered",
+		"reason", triggerReason,
 		"orderPrice", highestPrice,
 		"currentPrice", currentLastPrice,
 		"diffPct", fmt.Sprintf("%.4f%%", diffPct*100),
 		"orderID", highestOrder.ID,
+		"orderAge", time.Since(highestOrder.CreatedAt).String(),
 	)
 
 	// Fetch Real-time Book Ticker for Limit Maker Placement

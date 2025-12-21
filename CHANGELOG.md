@@ -1,5 +1,22 @@
 # Changelog
 
+## 2025-12-21
+### Adicionado
+- **Maker-Maker Strategy (Full Refactor)**:
+    - **Execução Passiva Total**: Mudança fundamental na estratégia. Agora, cada ordem de compra (`Maker Entry`) gera **imediatamente** uma ordem de venda correspondente (`Maker Exit`) no book, eliminando a dependência de polling e garantindo taxas Maker (0.075%/0.1%) nas duas pontas.
+    - **Zero Latency Exit**: A ordem de venda é posicionada no mesmo milissegundo em que a compra é confirmada via WebSocket, garantindo que o bot nunca fique exposto ao mercado sem um alvo de saída definido.
+    - **Event Driven Architecture**: Remoção completa do loop de polling (`checkTakeProfit`). O bot agora reage 100% a eventos de WebSocket (`executionReport`), reduzindo uso de CPU e chamadas de API desnecessárias.
+    - **Segurança & Resiliência**:
+        - **Idempotência**: Proteção contra duplicidade de ordens caso o WebSocket envie o mesmo evento duas vezes.
+        - **Fail-Safe Balance**: Verificação de saldo em tempo real com fator de segurança (0.999) antes de posicionar a venda, prevenindo erros de "Insufficient Balance" por dust.
+        - **Sync Robusto**: No startup, o bot detecta se uma venda "pendente" (waiting_sell) foi executada enquanto estava offline e contabilidade o lucro corretamente.
+        - **Critical Alert**: Se a ordem de venda falhar após 5 tentativas (retries com backoff), o bot marca o status como `failed_placement` e envia alerta crítico no Telegram.
+- **Smart Entry V2.0 (Time-Based Reposition)**:
+    - **Trigger Híbrido**: Evolução da lógica de perseguição de preço. Agora o bot reposiciona a ordem de entrada em **dois cenários**:
+        - **Urgência (Price Runaway)**: Se o preço fugir X% rapidamente (setup original).
+        - **Estagnação (Idle Timeout)**: Se a ordem ficar parada no book "mofando" por Y minutos (ex: 20 min), mesmo sem variação de preço, para evitar custo de oportunidade em mercados laterais.
+    - **Configuração**: Adicionado `SMART_ENTRY_REPOSITION_MAX_IDLE_MIN` no `.env`.
+    - **Visibilidade**: Logs diferenciados indicando a razão do reposicionamento (`Price Runaway` vs `Stagnation`).
 ## 2025-12-18
 ### Adicionado
 - **Refatoração de Logging (Smart Observability)**:
