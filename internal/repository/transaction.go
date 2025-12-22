@@ -57,6 +57,15 @@ func (r *TransactionRepository) Get(id string) (model.Transaction, bool) {
 	return model.Transaction{}, false
 }
 
+func (r *TransactionRepository) GetBySellID(sellID string) (model.Transaction, bool) {
+	for _, tx := range r.transactions {
+		if tx.SellOrderID == sellID {
+			return tx, true
+		}
+	}
+	return model.Transaction{}, false
+}
+
 func (r *TransactionRepository) GetAll() []model.Transaction {
 	return r.transactions
 }

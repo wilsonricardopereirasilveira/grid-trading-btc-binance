@@ -99,13 +99,13 @@ func (s *Strategy) Execute(ticker model.Ticker, bnbPrice float64) {
 		if tx.Symbol == s.Cfg.Symbol && tx.Type == "buy" {
 			if tx.StatusTransaction == "open" {
 				openOrders = append(openOrders, tx)
-			} else if tx.StatusTransaction == "filled" {
+			} else if tx.StatusTransaction == "filled" || tx.StatusTransaction == "waiting_sell" {
 				filledOrders = append(filledOrders, tx)
 			}
 		}
 	}
 
-	s.placeNewGridOrders(openOrders, filledOrders, ticker.Price, bnbPrice)
+	s.placeNewGridOrders(openOrders, filledOrders, ticker.Price, ticker.Bid, bnbPrice)
 	s.checkLowBNB(bnbPrice)
 	s.checkSmartEntryReposition(openOrders, filledOrders, ticker.Price)
 }
@@ -116,6 +116,8 @@ func (s *Strategy) HandleOrderUpdate(event service.OrderUpdate) {
 		return
 	}
 
+	// logger.Debug("⚡ Processing Order Update") // Reduced noise
+
 	logger.Info("⚡ Order Update Received",
 		"id", event.ClientOrderID,
 		"status", event.Status,
@@ -125,11 +127,16 @@ func (s *Strategy) HandleOrderUpdate(event service.OrderUpdate) {
 	// Fetch transaction from Repo
 	tx, exists := s.TransactionRepo.Get(event.ClientOrderID)
 	if !exists {
-		// Possibly a manual order or one we don't track?
-		// Or maybe ClientOrderID mismatch.
-		// If it's a new fill for a Limit Buy we placed, we should have it in Repo.
-		logger.Debug("Received update for unknown order", "id", event.ClientOrderID)
-		return
+		// Check secondary lookup by SellOrderID
+		var found bool
+		tx, found = s.TransactionRepo.GetBySellID(event.ClientOrderID)
+		if !found {
+			// Possibly a manual order or one we don't track?
+			logger.Debug("Received update for unknown order", "id", event.ClientOrderID)
+			return
+		}
+		// Found via SellOrderID
+		// Continue execution with 'tx' found
 	}
 
 	if event.Status == "FILLED" {
@@ -493,7 +500,7 @@ func (s *Strategy) checkTakeProfit(filledOrders, openOrders []model.Transaction,
 	return false
 }
 
-func (s *Strategy) placeNewGridOrders(openOrders, filledOrders []model.Transaction, currentAsk, bnbPrice float64) {
+func (s *Strategy) placeNewGridOrders(openOrders, filledOrders []model.Transaction, currentAsk, currentBid, bnbPrice float64) {
 	allOrders := append(openOrders, filledOrders...)
 
 	// Sort by price ascending
@@ -517,7 +524,10 @@ func (s *Strategy) placeNewGridOrders(openOrders, filledOrders []model.Transacti
 
 	if priceInRange && (isFirstBuy || dropPct >= s.Cfg.GridSpacingPct) {
 		if len(allOrders) < s.Cfg.GridLevels {
-			executionPrice := currentAsk
+			// MAKER FIX: Use Current Bid (or slightly lower) to ensure we join the book and don't cross spread.
+			// Using currentAsk triggers Taker execution immediately on LIMIT buys.
+			executionPrice := currentBid // Was currentAsk
+
 			currentLevel := len(allOrders) + 1
 
 			// Calculate Order Value
@@ -549,10 +559,10 @@ func (s *Strategy) placeNewGridOrders(openOrders, filledOrders []model.Transacti
 				clientOrderID := fmt.Sprintf("BUY_%d_L%d", time.Now().UnixMilli(), currentLevel)
 
 				req := api.OrderRequest{
-					Symbol:           s.Cfg.Symbol,
-					Side:             "BUY",
-					Type:             "LIMIT",
-					TimeInForce:      "GTC",
+					Symbol: s.Cfg.Symbol,
+					Side:   "BUY",
+					Type:   "LIMIT_MAKER", // CORRECT FIX: Spot Post Only
+					// TimeInForce:      "GTC",         // REMOVED: API Error -1106 says not to send this for LIMIT_MAKER
 					Quantity:         qtyStr,
 					Price:            priceStr,
 					NewClientOrderID: clientOrderID,
@@ -562,7 +572,17 @@ func (s *Strategy) placeNewGridOrders(openOrders, filledOrders []model.Transacti
 
 				resp, err := s.Binance.CreateOrder(req)
 				if err != nil {
+					// Handle GTX Rejection (Post Only)
+					// Verify error content if possible, but generally if create fails we log and return.
+					// Important: Ensure we don't return partial success state.
 					logger.Error("❌ Failed to create Buy Order", "error", err)
+					return
+				}
+
+				// Check for GTX Expiry (Immediate cancel because it would be Taker)
+				if resp.Status == "EXPIRED" || resp.Status == "CANCELED" {
+					logger.Warn("⚠️ Maker Buy Order Rejected (Post Only/GTX)", "status", resp.Status, "price", priceStr)
+					// Do NOT save to transactions, effectively "cleaning up" regarding the persistence.
 					return
 				}
 
@@ -590,10 +610,13 @@ func (s *Strategy) placeNewGridOrders(openOrders, filledOrders []model.Transacti
 
 				if resp.Status == "FILLED" {
 					buyTx.StatusTransaction = "filled"
-					// We might need to handle "Maker Fill" logic (deducting balances etc)?
-					// But balances are now synced from API!
-					// So specific balance math in processFills is less critical for *Bot State*,
-					// but critical for *Transaction Tracking* (profit calcs).
+					// LOGIC FIX: Immediate Fill handling
+					// If filled immediately (e.g. matched hidden order or race condition despite GTX?), ensure Sell is placed.
+					// With GTX, this shouldn't happen often for "Maker", but if it does (e.g. auction), handle it.
+					logger.Info("⚡ Order filled immediately on creation - Placing Exit Order", "id", buyTx.ID)
+					s.placeMakerExitOrder(&buyTx)
+					// FIX: Notify User of Immediate Fill
+					s.sendTradeNotification(buyTx, 0, nil)
 				}
 
 				if err := s.TransactionRepo.Save(buyTx); err != nil {

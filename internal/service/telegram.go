@@ -87,14 +87,14 @@ func (s *TelegramService) SendTradeNotification(tx model.Transaction, profit flo
 				"📦 Qtd: %.6f\n"+
 				"💲 Preço: $%.2f\n"+
 				"💵 Total: $%.2f\n"+
-				"TAKER PROFIT: $%.4f\n"+
+				"💰 LUCRO (Realizado): $%.4f\n"+
 				"%s\n\n"+
 				"💰 Saldo USDT: $%.2f\n"+
 				"💰 Saldo BNB: %.4f\n"+
 				"📅 Data: %s",
 			tx.Symbol,
 			escapedTxID,
-			tx.StatusTransaction,
+			s.escapeMarkdown(tx.StatusTransaction),
 			amount,
 			price,
 			total,
@@ -119,7 +119,7 @@ func (s *TelegramService) SendTradeNotification(tx model.Transaction, profit flo
 				"📅 Data: %s",
 			tx.Symbol,
 			escapedTxID,
-			tx.StatusTransaction,
+			s.escapeMarkdown(tx.StatusTransaction),
 			amount,
 			price,
 			total,
