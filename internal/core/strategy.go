@@ -24,16 +24,47 @@ type Strategy struct {
 	lastUSDTAlertTime         time.Time
 	lastBNBAlertTime          time.Time
 	circuitBreakerTriggeredAt time.Time
+	tickSize                  float64
 }
 
 func NewStrategy(cfg *config.Config, balanceRepo *repository.BalanceRepository, transactionRepo *repository.TransactionRepository, telegramService *service.TelegramService, binanceClient *api.BinanceClient) *Strategy {
-	return &Strategy{
+	s := &Strategy{
 		Cfg:             cfg,
 		BalanceRepo:     balanceRepo,
 		TransactionRepo: transactionRepo,
 		TelegramService: telegramService,
 		Binance:         binanceClient,
 	}
+
+	// Fetch TickSize on startup
+	s.fetchTickSize()
+	return s
+}
+
+func (s *Strategy) fetchTickSize() {
+	info, err := s.Binance.GetExchangeInfo(s.Cfg.Symbol)
+	if err != nil {
+		logger.Error("⚠️ Failed to fetch ExchangeInfo for TickSize. Using default 0.01.", "error", err)
+		s.tickSize = 0.01
+		return
+	}
+
+	for _, symbol := range info.Symbols {
+		if symbol.Symbol == s.Cfg.Symbol {
+			for _, filter := range symbol.Filters {
+				if filter.FilterType == "PRICE_FILTER" {
+					ts, err := strconv.ParseFloat(filter.TickSize, 64)
+					if err == nil && ts > 0 {
+						s.tickSize = ts
+						logger.Info("✅ TickSize Detected", "symbol", s.Cfg.Symbol, "tickSize", ts)
+						return
+					}
+				}
+			}
+		}
+	}
+	logger.Warn("⚠️ TickSize not found in ExchangeInfo. Defaulting to 0.01.")
+	s.tickSize = 0.01
 }
 
 func (s *Strategy) Execute(ticker model.Ticker, bnbPrice float64) {
@@ -570,19 +601,47 @@ func (s *Strategy) placeNewGridOrders(openOrders, filledOrders []model.Transacti
 
 				logger.Info("Attempting to Place Order", "qty", qtyStr, "price", priceStr)
 
-				resp, err := s.Binance.CreateOrder(req)
+				// 3. Execution with Retry (Smart Logic for -2010)
+				var resp *api.OrderResponse
+				var err error // Declare error outside loop scope
+				maxRetries := 3
+
+				for i := 0; i < maxRetries; i++ {
+					req.Price = priceStr // Ensure reset on retry loop
+					resp, err = s.Binance.CreateOrder(req)
+
+					if err == nil {
+						break // Success
+					}
+
+					// Check for "Order would immediately match and take" (-2010)
+					errorMsg := err.Error()
+
+					// We tried to be smart, but let's just log and retry with backoff/adjustment
+					logger.Warn("⚠️ Order Placement Failed. Retrying...", "attempt", i+1, "error", errorMsg)
+
+					// Smart Backoff & Price Adjustment
+					time.Sleep(time.Duration(200+(i*100)) * time.Millisecond)
+
+					// Adjust Price: Decrease by tickSize for Buy
+					if s.tickSize > 0 {
+						p, _ := strconv.ParseFloat(priceStr, 64)
+						newPrice := p - s.tickSize
+						priceStr = fmt.Sprintf("%.2f", newPrice)
+						logger.Info("📉 Adjusting Price for Retry", "old", req.Price, "new", priceStr)
+					}
+				}
+
 				if err != nil {
-					// Handle GTX Rejection (Post Only)
-					// Verify error content if possible, but generally if create fails we log and return.
-					// Important: Ensure we don't return partial success state.
-					logger.Error("❌ Failed to create Buy Order", "error", err)
+					// Handle GTX Rejection (Post Only) caused by failure even after retries
+					logger.Error("❌ Failed to create Buy Order after retries", "error", err)
 					return
 				}
 
 				// Check for GTX Expiry (Immediate cancel because it would be Taker)
 				if resp.Status == "EXPIRED" || resp.Status == "CANCELED" {
 					logger.Warn("⚠️ Maker Buy Order Rejected (Post Only/GTX)", "status", resp.Status, "price", priceStr)
-					// Do NOT save to transactions, effectively "cleaning up" regarding the persistence.
+					// Do NOT save to transactions
 					return
 				}
 

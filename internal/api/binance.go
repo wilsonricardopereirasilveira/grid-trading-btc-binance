@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"grid-trading-btc-binance/internal/logger"
+	"grid-trading-btc-binance/internal/model"
 )
 
 const (
@@ -509,4 +510,35 @@ func (c *BinanceClient) GetBookTicker(symbol string) (*BookTickerResponse, error
 		return nil, fmt.Errorf("unmarshal error: %w", err)
 	}
 	return &ticker, nil
+}
+
+func (c *BinanceClient) GetExchangeInfo(symbol string) (*model.ExchangeInfoResponse, error) {
+	endpoint := "/api/v3/exchangeInfo"
+	// If symbol is provided, we can filter for efficiency
+	reqURL := fmt.Sprintf("%s%s", c.BaseURL, endpoint)
+	if symbol != "" {
+		reqURL = fmt.Sprintf("%s?symbol=%s", reqURL, symbol)
+	}
+
+	resp, err := c.Client.Get(reqURL)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read error: %w", err)
+	}
+
+	var info model.ExchangeInfoResponse
+	if err := json.Unmarshal(body, &info); err != nil {
+		return nil, fmt.Errorf("unmarshal error: %w", err)
+	}
+	return &info, nil
 }

@@ -1,5 +1,17 @@
 # Changelog
 
+## 2025-12-22
+### Corrigido (Hotfix)
+- **Correção de Loop de Ordens (Stop-Gap -2010)**:
+    - **TickSize Discovery**: O bot agora consulta a API da Binance (`exchangeInfo`) na inicialização para descobrir o `tickSize` exato do ativo (ex: 0.01 para BTCUSDT), eliminando "adivinhações" e arredondamentos incorretos.
+    - **Smart Retry Logic**: 
+        - Resolução definitiva do erro `Order would immediately match and take` (-2010). 
+        - Se a tentativa de ordem `MAKER` for rejeitada por estar no topo do book, o bot aplica um **backoff inteligente** (espera 200-500ms) e retenta com o preço ajustado (`Bid - TickSize`), garantindo a execução passiva sem estourar taxas Taker.
+- **Correção de Dados e Relatórios (CSV)**:
+    - **Data Integrity**: Removidas colunas duplicadas que quebravam o alinhamento do arquivo `analyze_strategy.csv`.
+    - **Maker Sales Reporting**: Ajustada a lógica do coletor para reconhecer transações `closed` como vendas realizadas (adaptando-se à estratégia Maker-Maker que não gera nova tx de venda).
+    - **PnL Real**: O lucro realizado agora é calculado matematicamente (`(SellPrice - BuyPrice) * Quantity`) garantindo precisão financeira nos relatórios horários.
+
 ## 2025-12-21
 ### Adicionado
 - **Maker-Maker Strategy (Full Refactor)**:

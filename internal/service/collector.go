@@ -113,28 +113,46 @@ func (c *DataCollector) CollectAndSave() {
 		amount, _ := strconv.ParseFloat(tx.Amount, 64)
 		price, _ := strconv.ParseFloat(tx.Price, 64)
 		fee, _ := strconv.ParseFloat(tx.Fee, 64)
-		totalVal := amount * price
 
 		// Accumulate Fees (Assuming BNB per user request)
 		feesBNB += fee
 
 		if tx.Type == "buy" {
+			// Check if this buy has a completed Maker Exit (Sold)
+			// Maker-Maker Strategy uses the SAME transaction record, adding Sell details.
+			// Or maybe we treat "closed" buy as a completed cycle.
 			tradesBuy++
 			totalBuyPrice += price
+
+			if tx.StatusTransaction == "closed" && tx.SellOrderID != "" {
+				tradesSell++
+				// Volume for Sell side
+				// Use SellPrice if available, otherwise estimate?
+				// Model has SellPrice float64
+				sellVal := tx.SellPrice * tx.QuantitySold
+				if sellVal == 0 {
+					// Fallback if quantitySold not fully tracked yet (legacy?)
+					// Assume full amount sold at SellPrice
+					sellVal = tx.SellPrice * amount
+				}
+
+				volumeUSDT += sellVal
+				volumeBTC += amount // Sold same amount
+				totalSellPrice += tx.SellPrice
+
+				// Realized Profit
+				// (Sell Price - Buy Price) * Amount
+				pnl := (tx.SellPrice - price) * amount
+				realizedProfit += pnl
+			}
+
 		} else if tx.Type == "sell" {
+			// Older strategy or Taker Sells if any exist
 			tradesSell++
+			totalVal := amount * price
 			volumeUSDT += totalVal
 			volumeBTC += amount
 			totalSellPrice += price
-
-			// Extract profit from notes if possible, or calculate rough approx?
-			// The user asked for "realized_profit_usdt".
-			// In our Strategy, we put "TAKER PROFIT: $0.1234" in Notes.
-			// Let's try to parse it or just leave 0 for now if too complex.
-			// Simple parsing:
-			var profit float64
-			fmt.Sscanf(tx.Notes, "TAKER PROFIT: $%f", &profit)
-			realizedProfit += profit
 		}
 	}
 
@@ -189,9 +207,7 @@ func (c *DataCollector) CollectAndSave() {
 		fmt.Sprintf("%.8f", feesBNB),
 		fmt.Sprintf("%.4f", feesUSDTEquiv),
 		fmt.Sprintf("%d", openOrdersCount),
-		fmt.Sprintf("%.8f", feesBNB),
-		fmt.Sprintf("%.4f", feesUSDTEquiv),
-		fmt.Sprintf("%d", openOrdersCount),
+		// Duplicate columns removed here
 		fmt.Sprintf("%.4f", unrealizedPnL),
 		fmt.Sprintf("%.2f", rangeUtilizationPct),
 	}

@@ -15,7 +15,6 @@ main
 
 # Data / Generated files
 analyze_strategy.csv
-balances.json
 transactions.json
 
 # IDEs
