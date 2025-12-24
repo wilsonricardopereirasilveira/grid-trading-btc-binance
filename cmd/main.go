@@ -10,6 +10,7 @@ import (
 	"grid-trading-btc-binance/internal/config"
 	"grid-trading-btc-binance/internal/core"
 	"grid-trading-btc-binance/internal/logger"
+	"grid-trading-btc-binance/internal/market"
 	"grid-trading-btc-binance/internal/model"
 	"grid-trading-btc-binance/internal/repository"
 	"grid-trading-btc-binance/internal/service"
@@ -31,6 +32,8 @@ func main() {
 		"range_max", cfg.RangeMax,
 		"taker_fee", cfg.TakerFeePct,
 		"maker_fee", cfg.MakerFeePct,
+		"high_vol_mult", cfg.HighVolMultiplier,
+		"low_vol_mult", cfg.LowVolMultiplier,
 	)
 
 	// Initialize Repositories
@@ -82,9 +85,13 @@ func main() {
 	dataCollector := service.NewDataCollector(cfg, balanceRepo, transactionRepo, marketDataService)
 	telegramService := service.NewTelegramService(cfg)
 	streamService := service.NewStreamService(binanceClient)
+	volatilityService := market.NewVolatilityService(cfg, binanceClient)
+
+	// Start Volatility Polling
+	volatilityService.StartPolling()
 
 	// Strategy
-	strategy := core.NewStrategy(cfg, balanceRepo, transactionRepo, telegramService, binanceClient)
+	strategy := core.NewStrategy(cfg, balanceRepo, transactionRepo, telegramService, binanceClient, volatilityService)
 
 	// Bot
 	bot := core.NewBot(cfg, balanceRepo, transactionRepo, marketDataService, strategy, dataCollector)

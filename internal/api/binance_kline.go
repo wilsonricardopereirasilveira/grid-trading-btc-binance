@@ -83,16 +83,22 @@ func (c *BinanceClient) GetRecentKlines(symbol, interval string, limit int) ([]K
 		if len(k) < 7 {
 			continue
 		}
-		// Index 0: OpenTime (float64 in json interface -> int64)
-		// Index 2: High (string)
-		// Index 4: Close (string)
-		ot, _ := k[0].(float64) // JSON numbers are float64 by default in interface{}
+		// Index 0: OpenTime
+		// Index 1: Open
+		// Index 2: High
+		// Index 3: Low
+		// Index 4: Close
+		ot, _ := k[0].(float64)
+		openPrice, _ := k[1].(string)
 		high, _ := k[2].(string)
+		low, _ := k[3].(string)
 		closePrice, _ := k[4].(string)
 
 		klines = append(klines, Kline{
 			OpenTime: int64(ot),
+			Open:     openPrice,
 			High:     high,
+			Low:      low,
 			Close:    closePrice,
 		})
 	}

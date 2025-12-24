@@ -9,6 +9,7 @@ import (
 	"grid-trading-btc-binance/internal/api"
 	"grid-trading-btc-binance/internal/config"
 	"grid-trading-btc-binance/internal/logger"
+	"grid-trading-btc-binance/internal/market"
 	"grid-trading-btc-binance/internal/model"
 	"grid-trading-btc-binance/internal/repository"
 	"grid-trading-btc-binance/internal/service"
@@ -20,6 +21,7 @@ type Strategy struct {
 	TransactionRepo           *repository.TransactionRepository
 	TelegramService           *service.TelegramService
 	Binance                   *api.BinanceClient
+	VolatilityService         *market.VolatilityService
 	lastFillCheck             time.Time
 	lastUSDTAlertTime         time.Time
 	lastBNBAlertTime          time.Time
@@ -27,13 +29,14 @@ type Strategy struct {
 	tickSize                  float64
 }
 
-func NewStrategy(cfg *config.Config, balanceRepo *repository.BalanceRepository, transactionRepo *repository.TransactionRepository, telegramService *service.TelegramService, binanceClient *api.BinanceClient) *Strategy {
+func NewStrategy(cfg *config.Config, balanceRepo *repository.BalanceRepository, transactionRepo *repository.TransactionRepository, telegramService *service.TelegramService, binanceClient *api.BinanceClient, volatilityService *market.VolatilityService) *Strategy {
 	s := &Strategy{
-		Cfg:             cfg,
-		BalanceRepo:     balanceRepo,
-		TransactionRepo: transactionRepo,
-		TelegramService: telegramService,
-		Binance:         binanceClient,
+		Cfg:               cfg,
+		BalanceRepo:       balanceRepo,
+		TransactionRepo:   transactionRepo,
+		TelegramService:   telegramService,
+		Binance:           binanceClient,
+		VolatilityService: volatilityService,
 	}
 
 	// Fetch TickSize on startup
@@ -303,7 +306,8 @@ func (s *Strategy) placeMakerExitOrder(tx *model.Transaction) {
 	// The prompt said: SellPrice = BuyPrice * (1 + ProfitMargin).
 	// Let's use GridSpacingPct as valid Proxy if ProfitMargin not explicit.
 	// Actually, typically for Grid, Sell = Buy + GridSpacing.
-	targetPrice := buyPrice * (1 + s.Cfg.GridSpacingPct)
+	dynamicSpacing := s.VolatilityService.GetDynamicSpacing()
+	targetPrice := buyPrice * (1 + dynamicSpacing)
 
 	sellPriceStr := fmt.Sprintf("%.2f", targetPrice)
 
@@ -553,7 +557,10 @@ func (s *Strategy) placeNewGridOrders(openOrders, filledOrders []model.Transacti
 	isFirstBuy := len(allOrders) == 0
 	priceInRange := currentAsk >= s.Cfg.RangeMin && currentAsk <= s.Cfg.RangeMax
 
-	if priceInRange && (isFirstBuy || dropPct >= s.Cfg.GridSpacingPct) {
+	// DYNAMIC SPREAD via Volatility Service
+	dynamicSpacing := s.VolatilityService.GetDynamicSpacing()
+
+	if priceInRange && (isFirstBuy || dropPct >= dynamicSpacing) {
 		if len(allOrders) < s.Cfg.GridLevels {
 			// MAKER FIX: Use Current Bid (or slightly lower) to ensure we join the book and don't cross spread.
 			// Using currentAsk triggers Taker execution immediately on LIMIT buys.

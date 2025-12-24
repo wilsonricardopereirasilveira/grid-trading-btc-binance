@@ -1,5 +1,15 @@
 # Changelog
 
+## 2025-12-24
+### Adicionado
+- **Dynamic Spread via Garman-Klass (Volatilidade Avançada)**:
+    - **O que é**: Implementação de espaçamento dinâmico do grid baseado na volatilidade real do mercado. Substitui o `GRID_SPACING_PCT` fixo por um cálculo matemático profissional (Garman-Klass).
+    - **Regime Detection**: O bot compara a volatilidade curta (5 min) vs longa (20 min).
+        - **Crash/High Vol**: Usa multiplicador 3.5x para abrir o grid e proteger capital.
+        - **Normal**: Usa multiplicador 1.8x para lucrar com o ruído.
+    - **Benefício**: Transforma o bot em um "Sniper" que opera agressivamente (0.1% de spread) em calma e defensivamente (2.0%+) em crashes.
+    - **Configuração**: Novas vars `HIGH_VOL_MULTIPLIER` e `LOW_VOL_MULTIPLIER`.
+
 ## 2025-12-23
 ### Adicionado
 - **SyncOrdersOnStartup (Two-Way Sync)**:

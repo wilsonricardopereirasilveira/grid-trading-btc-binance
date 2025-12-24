@@ -3,14 +3,7 @@
 ## � Próximo Update (Foco Total)
 **Foco**: Implementar inteligência de defesa e recuperação de capital.
 
-- [ ] **Dynamic Spread via Garman-Klass (Volatilidade Avançada)**
-  - **O que é**: Substituir o `GRID_SPACING_PCT` fixo por um cálculo dinâmico de volatilidade usando o estimador **Garman-Klass (GK)**, que é 7x mais eficiente que o ATR por considerar OHLC (Open, High, Low, Close) e Gaps.
-  - **Regime Detection (Smart Multiplier)**: Comparar volatilidade curta (5 min) vs longa (20 min).
-    - Se Curta > Longa * 1.5 (Aceleração/Crash): Usar `HIGH_VOL_MULTIPLIER` (ex: 3.5x) para abrir o grid.
-    - Normal: Usar `LOW_VOL_MULTIPLIER` (ex: 1.8x) para lucrar no ruído.
-  - **Detalhe Técnico**: Candles de 1 minuto (`interval='1m'`), pegando o bloco para cálculo.
-  - **Implementação**: Polling via **REST API** a cada 60s para garantir dados estáveis (candles fechados) e baixo consumo de API.
-  - **Por que**: Otimiza a entrada usando matemática financeira profissional, evitando compras prematuras no início de crashes violentos.
+
 
 - [ ] **Smart Recovery Strategy (Híbrido Grid+DCA)**
   - **O que é**: Ativar modo "Resgate" em quedas profundas (ex: Nível 10+). Agrupa ordens presas e novas compras em um "pacote", calcula preço médio ponderado e sai de tudo com lucro mínimo no primeiro repique.

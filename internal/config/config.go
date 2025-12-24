@@ -22,6 +22,11 @@ type Config struct {
 	RangeMax        float64
 	MinOrderValue   float64
 
+	// Volatility Settings
+	HighVolMultiplier  float64
+	LowVolMultiplier   float64
+	VolatilityLookback int
+
 	// Smart Entry Repositioning
 	SmartEntryRepositionPct        float64
 	SmartEntryRepositionCooldown   int
@@ -113,6 +118,29 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Volatility Settings
+	valHighVol := os.Getenv("HIGH_VOL_MULTIPLIER")
+	if valHighVol != "" {
+		cfg.HighVolMultiplier, err = parseFloat(valHighVol, "HIGH_VOL_MULTIPLIER")
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		cfg.HighVolMultiplier = 3.5 // Default
+	}
+
+	valLowVol := os.Getenv("LOW_VOL_MULTIPLIER")
+	if valLowVol != "" {
+		cfg.LowVolMultiplier, err = parseFloat(valLowVol, "LOW_VOL_MULTIPLIER")
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		cfg.LowVolMultiplier = 1.8 // Default
+	}
+
+	cfg.VolatilityLookback = 20 // Fixed lookback
 
 	// Smart Entry Defaults (Optional params)
 	valRepositionPct := os.Getenv("SMART_ENTRY_REPOSITION_PCT")
