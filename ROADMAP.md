@@ -28,10 +28,13 @@
   - **O que é**: Definir um diretório fixo (ex: /data/) para transactions.json e logs, separando código de dados.
   - **Por que**: Facilita backups e evita deletar o "cérebro" do bot num deploy acidental.
 
+- [ ] **Tratamento de Erros de WebSocket (Binance)**
+  - **O que é**: Implementar tratamento e reconexão automática para erros comuns de rede identificados:
+    - `"write tcp ... broken pipe"`
+    - `"websocket: close 1008 (policy violation): Pong timeout"`
+  - **Por que**: Garantir que o bot recupere a conexão automaticamente e limpe o log de erros não críticos.
+
 ### Robustez e Correção de Estado
-- [ ] **SyncOrdersOnStartup (O "Fim do Ponto Cego")**
-  - **O que é**: Ao iniciar, o bot deve consultar a API da Binance (GetOpenOrders) e comparar com o transactions.json. Se uma ordem está "Open" no JSON mas não existe na Binance, ele deve checar se foi FILLED ou CANCELED e atualizar o JSON antes de começar.
-  - **Por que**: Resolve o problema de perder trades se o bot reiniciar enquanto o mercado se move.
 
 - [ ] **Log de "Missed Opportunities" (Oportunidades Perdidas)**
   - **O que é**: Quando falhar por saldo insuficiente, registrar isso estruturadamente no CSV ou num log específico (ex: missed_orders.log).

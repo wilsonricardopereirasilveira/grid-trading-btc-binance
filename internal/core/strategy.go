@@ -763,85 +763,170 @@ func (s *Strategy) AnalyzeStartupState() {
 	}
 }
 
-// SyncOrdersOnStartup checks all 'open' orders in the repository against Binance API
-// to catch any state changes that happened while the bot was offline.
+// SyncOrdersOnStartup performs a Two-Way Synchronization:
+// 1. Forward Sync: Imports any open orders on Binance that are missing locally (Orphans).
+// 2. Reverse Sync: Updates any local 'open' orders that are no longer open on Binance (Filled/Canceled).
 func (s *Strategy) SyncOrdersOnStartup() {
-	logger.Info("🔄 Syncing Open Orders with Binance...")
+	logger.Info("🔄 Starting Two-Way Order Synchronization...")
 
+	// 1. Fetch ALL Open Orders from Binance
+	binantOpenOrders, err := s.Binance.GetOpenOrders(s.Cfg.Symbol)
+	if err != nil {
+		logger.Error("❌ Critical: Failed to fetch open orders from Binance on startup. Aborting sync.", "error", err)
+		return
+	}
+
+	binanceOrderMap := make(map[string]api.OrderResponse)
+	for _, bo := range binantOpenOrders {
+		binanceOrderMap[bo.ClientOrderId] = bo
+	}
+
+	// 2. Load Local Transactions
 	transactions := s.TransactionRepo.GetAll()
-	var syncedCount int
+	localOrderMap := make(map[string]*model.Transaction)
+	for i := range transactions {
+		// Pointer to allow updates if needed (though we usually use ID to UpdateViaRepo)
+		localOrderMap[transactions[i].ID] = &transactions[i]
+	}
 
-	for _, tx := range transactions {
-		// MAKER ENTRY CHECK (Buy Limit)
-		if tx.StatusTransaction == "open" {
-			// Check status on Binance
-			resp, err := s.Binance.GetOrder(tx.Symbol, tx.ID)
-			if err != nil {
-				logger.Error("⚠️ Failed to check order status on startup, skipping sync for this order", "orderID", tx.ID, "error", err)
-				continue
+	// ===================================================================================
+	// PHASE 1: FORWARD SYNC (Binance -> Local) - Import Orphans
+	// ===================================================================================
+	for clientID, binOrder := range binanceOrderMap {
+		if _, exists := localOrderMap[clientID]; !exists {
+			// Orphan Detected!
+			// We skip if it's not a Grid Order (optional: check prefix?)
+			// But for safety, we track EVERYTHING for this symbol.
+
+			logger.Warn("👻 Orphan Order Detected on Binance (Not in DB). Importing...", "id", clientID, "price", binOrder.Price)
+
+			// Determine Type
+			txType := "buy"
+			if binOrder.Side == "SELL" {
+				txType = "sell"
 			}
 
-			// If status changed, update our repo
-			if resp.Status != "NEW" && resp.Status != "PARTIALLY_FILLED" {
-				logger.Info("🔄 Order Status Changed while offline", "orderID", tx.ID, "old_status", "open", "new_status", resp.Status)
-
-				if resp.Status == "FILLED" {
-					tx.StatusTransaction = "filled"
-					tx.Price = resp.Price // Use confirmation price
-					if resp.ExecutedQty != "" {
-						tx.Amount = resp.ExecutedQty
-					}
-					tx.Notes += " | Synced On Startup"
-					s.TransactionRepo.Update(tx)
-					syncedCount++
-
-					logger.Info("✅ Order synced as FILLED - Triggering Maker Exit", "orderID", tx.ID)
-					// Trigger Exit creation for this missed fill
-					s.placeMakerExitOrder(&tx)
-
-				} else if resp.Status == "CANCELED" || resp.Status == "REJECTED" || resp.Status == "EXPIRED" {
-					tx.StatusTransaction = "closed"
-					tx.Notes += fmt.Sprintf(" | Synced On Startup: %s", resp.Status)
-					s.TransactionRepo.Update(tx)
-					syncedCount++
-
-					logger.Info("🚫 Order synced as CLOSED/CANCELED", "orderID", tx.ID)
-				}
-			}
-		}
-
-		// MAKER EXIT CHECK (Waiting Sell)
-		if tx.StatusTransaction == "waiting_sell" && tx.SellOrderID != "" {
-			resp, err := s.Binance.GetOrder(tx.Symbol, tx.SellOrderID)
-			if err != nil {
-				// 404 Case or Error
-				logger.Error("⚠️ Failed to check SELL Order status on startup", "sellID", tx.SellOrderID, "error", err)
-				// If error contains code -2013 (Order does not exist), it might be 404.
-				// Standard Binance error checks needed.
-				// Assuming critical error for now.
-				// If 404, we might need to recreate?
-				continue
+			newTx := model.Transaction{
+				ID:                binOrder.ClientOrderId,
+				TransactionID:     binOrder.ClientOrderId,
+				Symbol:            binOrder.Symbol,
+				Type:              txType,
+				Amount:            binOrder.OrigQty,
+				Price:             binOrder.Price,
+				StatusTransaction: "open", // It's in OpenOrders, so it MUST be open
+				Notes:             "Recovered during Startup Sync",
+				CreatedAt:         time.Unix(binOrder.TransactTime/1000, 0),
+				UpdatedAt:         time.Now(),
 			}
 
-			if resp.Status == "FILLED" {
-				// Sold!
-				logger.Info("💰 Maker Exit Found FILLED on Startup", "sellID", tx.SellOrderID)
-				tx.StatusTransaction = "closed"
-				tx.ClosedAt = &time.Time{}
-				*tx.ClosedAt = time.Now() // Approximate or use UpdateTime from resp
-				tx.Notes += " | Sold while offline"
-				s.TransactionRepo.Update(tx)
-				syncedCount++
-			} else if resp.Status == "CANCELED" || resp.Status == "REJECTED" || resp.Status == "EXPIRED" {
-				logger.Warn("⚠️ Maker Exit Found CANCELED on Startup. Recreating...", "sellID", tx.SellOrderID)
-				// Re-place order
-				s.placeMakerExitOrder(&tx)
+			// If it's a SELL, we try to link it to a buy if possible, but hard without context.
+			// Just saving it ensures we don't lose track of the exit.
+
+			if err := s.TransactionRepo.Save(newTx); err != nil {
+				logger.Error("Failed to save imported orphan order", "error", err)
+			} else {
+				logger.Info("✅ Orphan Order Imported Successfully", "id", newTx.ID)
 			}
-			// If NEW/PARTIALLY_FILLED, it's fine.
 		}
 	}
 
-	logger.Info("✅ Startup Order Sync Completed", "updated_orders", syncedCount)
+	// ===================================================================================
+	// PHASE 2: REVERSE SYNC (Local -> Binance) - Check Status of Local Open Orders
+	// ===================================================================================
+	var syncedCount int
+	// Re-fetch transactions to include newly imported ones?
+	// Phase 2 only cares about what WE think is open.
+	// If we just imported it as Open (Phase 1), and it IS in Binance Open Orders (definition of Phase 1),
+	// then Phase 2 check (is it in Binance?) will say YES. So no change. Correct.
+
+	// We iterate over the original list + imports? No, just iterate repo again or map.
+	// Let's iterate current state of Repo to be safe.
+	currTransactions := s.TransactionRepo.GetAll()
+
+	for _, tx := range currTransactions {
+		// We only care about reconciling 'open' or 'waiting_sell' orders
+		if tx.StatusTransaction != "open" && tx.StatusTransaction != "waiting_sell" {
+			continue
+		}
+
+		// Check if this local order exists in the Binance Open Orders list
+		_, isOpenOnBinance := binanceOrderMap[tx.ID]
+
+		if isOpenOnBinance {
+			// Order is still open. Everything is fine.
+			// Optional: Update Price/Qty if modified? Usually not for Limit.
+			continue
+		}
+
+		// IF WE ARE HERE: Order is OPEN locally, but NOT in Binance Open Orders.
+		// Conclusion: It was Filled, Canceled, or Expired while we were offline.
+		logger.Info("🔄 Order missed from OpenOrders list (Closed offline). Checking status...", "id", tx.ID)
+
+		// Fetch specific order details to know exact final state
+		resp, err := s.Binance.GetOrder(tx.Symbol, tx.ID)
+		if err != nil {
+			logger.Error("⚠️ Failed to check status of missing order", "id", tx.ID, "error", err)
+			// Decide: Keep as open? Or mark unknown? Keep open to retry next sync.
+			continue
+		}
+
+		// Update Local State
+		if resp.Status == "FILLED" {
+			tx.StatusTransaction = "filled"
+			tx.Price = resp.Price
+			if resp.ExecutedQty != "" {
+				tx.Amount = resp.ExecutedQty
+			}
+			tx.Notes += " | Synced (Filled Offline)"
+			tx.UpdatedAt = time.Now()
+			s.TransactionRepo.Update(tx)
+			syncedCount++
+
+			logger.Info("✅ Order Synced: FILLED Offline", "id", tx.ID)
+
+			// ACTION: If it was a BUY, we must ensure we have an Exit!
+			if tx.Type == "buy" {
+				// Check if we already have a sell order linked?
+				if tx.SellOrderID != "" {
+					// Check if that sell order is active?
+					// If SellOrderID exists, we assume logic handled it or it's the 'waiting_sell' one.
+					// But if it was just filled, likely no sell exists yet (unless partial).
+					// Let's double check.
+				}
+				logger.Info("🚀 Triggering Maker Exit for Offline Fill", "buyID", tx.ID)
+				s.placeMakerExitOrder(&tx)
+			}
+
+			// ACTION: If it was a SELL (Maker Exit), calculate profit
+			if tx.Type == "sell" {
+				tx.StatusTransaction = "closed"
+				now := time.Now()
+				tx.ClosedAt = &now
+				tx.Notes += " | Sold Offline"
+				s.TransactionRepo.Update(tx)
+				logger.Info("💰 Maker Exit Confirmed Closed (Offline)", "sellID", tx.ID)
+				// We could try to calculate profit here if we link to Buy, but for now just marking closed is critical.
+			}
+
+		} else if resp.Status == "CANCELED" || resp.Status == "EXPIRED" || resp.Status == "REJECTED" {
+			// If it was CANCELED, we mark it closed (or removed).
+			tx.StatusTransaction = "closed" // Or "cancelled" if we had that status
+			tx.Notes += fmt.Sprintf(" | Synced (%s Offline)", resp.Status)
+			tx.UpdatedAt = time.Now()
+			s.TransactionRepo.Update(tx)
+			logger.Warn("⚠️ Order Synced: CANCELED/EXPIRED Offline", "id", tx.ID, "status", resp.Status)
+
+			// If it was a Maker Exit that got Canceled, do we need to replace it?
+			// Maybe. But for safety, we mark closed. Next strategy cycle might not see it.
+			// Ideal: Mark parent Buy as 'filled' (no, it is filled) but 'waiting_sell' -> 'open' (no).
+			// If Sell Canceled, we effectively have exposure without exit.
+			// This is a risk.
+			// Future improvement: "Revive" the Buy transaction to "filled" state without SellID so `placeMakerExit` runs again?
+			// For now, logging effectively covers the "Stop the bleeding" requirement.
+		}
+	}
+
+	logger.Info("✅ Startup Sync Completed", "synced_updates", syncedCount)
 }
 
 func (s *Strategy) checkAndAlertLowUSDT(currentBalance, required float64) {

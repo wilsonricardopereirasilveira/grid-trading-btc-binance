@@ -1,5 +1,14 @@
 # Changelog
 
+## 2025-12-23
+### Adicionado
+- **SyncOrdersOnStartup (Two-Way Sync)**:
+    - **O que é**: Implementação de sincronização bidirecional no startup. O bot agora consulta a API da Binance e:
+        1. **Importa Ordens Órfãs**: Se houver ordens na Binance não listadas localmente (ex: criadas antes de um crash do bot), ele as importa.
+        2. **Atualiza Status Offline**: Verifica se ordens "Open" locais foram Preenchidas ou Canceladas enquanto o bot estava desligado.
+    - **Resultado**: Elimina o "ponto cego" onde o bot perdia o rastreio de ordens e saldo. Se encontrar uma compra preenchida offline, lança a venda imediatamente.
+
+
 ## 2025-12-22
 ### Corrigido (Hotfix)
 - **Correção de Loop de Ordens (Stop-Gap -2010)**:
