@@ -8,6 +8,11 @@
         2. **Atualiza Status Offline**: Verifica se ordens "Open" locais foram Preenchidas ou Canceladas enquanto o bot estava desligado.
     - **Resultado**: Elimina o "ponto cego" onde o bot perdia o rastreio de ordens e saldo. Se encontrar uma compra preenchida offline, lança a venda imediatamente.
 
+- **Grid Gap Detection (Smart Backfill)**:
+    - **O que é**: Unificação da lógica de "Smart Entry Repositioning" com "Backfill".
+    - **Como funciona**: O bot agora monitora a distância entre a maior ordem de compra e o preço atual. Se essa distância ("Gap") for maior que **2.5x** o espaçamento do grid, o bot entende que o grid ficou para trás.
+    - **Ação**: Automaticamente cancela a ordem de entrada mais antiga (fundo do grid) e a reposiciona no topo (`CurrentBid`), fechando o buraco e acompanhando a subida do mercado sem aumentar a exposição de capital.
+
 
 ## 2025-12-22
 ### Corrigido (Hotfix)

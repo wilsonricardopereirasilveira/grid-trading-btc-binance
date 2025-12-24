@@ -1009,25 +1009,33 @@ func (s *Strategy) checkSmartEntryReposition(openOrders, filledOrders []model.Tr
 
 	diffPct := (currentLastPrice - highestPrice) / highestPrice
 
-	// 4. Trigger Logic (Smart Entry V2.0)
-	// Condition A: Price Runaway (Urgent) - Only if Cooldown passed
+	// 4. Trigger Logic (Smart Entry V2.0 + Grid Gap Fix)
+	// A) Price Runaway (Urgent)
 	isPriceRunaway := diffPct >= s.Cfg.SmartEntryRepositionPct
 	cooldown := time.Duration(s.Cfg.SmartEntryRepositionCooldown) * time.Minute
 	isCooldownPassed := time.Since(highestOrder.CreatedAt) >= cooldown
 
-	// Condition B: Stagnation (Boredom) - If order is too old (e.g. 20 min)
-	// We want to force reposition to current market even if price didn't run away X%.
+	// B) Stagnation (Idle Timeout)
 	maxIdle := time.Duration(s.Cfg.SmartEntryRepositionMaxIdleMin) * time.Minute
-	isStagnant := time.Since(highestOrder.CreatedAt) >= maxIdle
+	isStagnant := s.Cfg.SmartEntryRepositionMaxIdleMin > 0 && time.Since(highestOrder.CreatedAt) >= maxIdle
 
-	shouldReposition := (isPriceRunaway && isCooldownPassed) || isStagnant
+	// C) Grid Gap Detection (Backfill Unification)
+	// If current price moved UP significantly leaving a gap > 2x GridSpacing
+	// We want to pull the bottom order UP to fill this gap.
+	// Logic: Diff > GridSpacing * 2.0
+	// We use 2.0 as threshold to ensure we don't churn on small noise.
+	isGridGap := diffPct >= (s.Cfg.GridSpacingPct * 2.5)
+
+	shouldReposition := (isPriceRunaway && isCooldownPassed) || isStagnant || isGridGap
 
 	if !shouldReposition {
 		return
 	}
 
 	triggerReason := "Price Runaway"
-	if isStagnant && !isPriceRunaway {
+	if isGridGap {
+		triggerReason = "Grid Gap (Backfill)"
+	} else if isStagnant && !isPriceRunaway {
 		triggerReason = "Stagnation (Idle Timeout)"
 	}
 
