@@ -13,6 +13,13 @@
     - **Solução**:
         1. **Cooldown**: Se a compra falhar 3x, o bot pausa novas compras por 60 segundos.
         2. **Aggressive Backoff**: No retry, o preço é reduzido em **0.05%** (em vez de 1 tick), garantindo que a ordem entre como MAKER abaixo da faca caindo.
+- **Duplicate Order Fix (Spatial Check)**:
+    - **Problema**: O "Stuck Grid Fix" permitia comprar abaixo de vendas antigas, mas acabava comprando *em cima* de ordens recém-preenchidas, criando duplicatas no mesmo preço (L1/L2).
+    - **Solução**: Implementada verificação espacial (`Proximity Check`). Antes de abrir compra, o bot verifica se existe **qualquer** ordem (Aberta ou Preenchida) a menos de 50% do espaçamento dinâmico. Se existir, ele bloqueia a compra para evitar "empilhamento" de capital.
+- **Smart Idle Repositioning V2.0 (Reposição com Inventário)**:
+    - **Problema**: Em mercados laterais ou com leve alta, o bot ficava "preso" com uma ordem de compra muito baixa e não acompanhava o preço, perdendo oportunidades de scalping, simplesmente porque tinha inventário (Bags) antigo.
+    - **Solução**: Refatoração da lógica `Smart Entry`. Agora permitimos o reposicionamento da ordem de entrada **mesmo com inventário**, desde que seja por motivo de **Estagnação** (Idle Timeout de 15 min).
+    - **Safety**: A proteção contra **Price Runaway** (explosão de preço) continua ativa: se o preço subir rápido demais (> 0.5%), a trava de inventário bloqueia a perseguição para evitar comprar topo.
 ### Melhorado
 - **Observabilidade (CSV Analyst)**:
     - Adicionadas colunas profundas ao `analyze_strategy.csv`:

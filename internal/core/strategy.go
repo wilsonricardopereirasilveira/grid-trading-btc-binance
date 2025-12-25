@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"time"
@@ -581,6 +582,26 @@ func (s *Strategy) placeNewGridOrders(openOrders, filledOrders []model.Transacti
 
 	// Logic: Buy if (No Active Buys currently) OR (Price dropped enough below lowest active buy)
 	if priceInRange && (isGridEmptyOfBuys || dropPct >= dynamicSpacing) {
+		// SPATIAL CHECK (Anti-Duplicate):
+		// Ensure we don't buy if there's ALREADY an order (Open or Filled) very close to this price.
+		// The "IgnoreInventory" logic allowed us to buy below bags, but we must not buy ON TOP of bags/fills.
+		isTooClose := false
+		minDist := dynamicSpacing * 0.5 // Allow some overlap but not much. 50% of spacing.
+
+		for _, o := range allOrders {
+			p, _ := strconv.ParseFloat(o.Price, 64)
+			distPct := math.Abs(p-currentAsk) / p
+			if distPct < minDist {
+				logger.Debug("🚫 Price too close to existing order", "current", currentAsk, "existing", p, "dist", distPct)
+				isTooClose = true
+				break
+			}
+		}
+
+		if isTooClose {
+			return
+		}
+
 		if len(allOrders) < s.Cfg.GridLevels {
 			// MAKER FIX: Use Current Bid (or slightly lower) to ensure we join the book and don't cross spread.
 			// Using currentAsk triggers Taker execution immediately on LIMIT buys.
@@ -1002,12 +1023,7 @@ func (s *Strategy) checkLowBNB(bnbPrice float64) {
 }
 
 func (s *Strategy) checkSmartEntryReposition(openOrders, filledOrders []model.Transaction, currentLastPrice float64) {
-	// 1. Zero Inventory Rule: Only reposition if we hold NO position.
-	if len(filledOrders) > 0 {
-		return
-	}
-
-	// 2. Must have Open Orders to reposition
+	// 1. Must have Open Orders to reposition
 	if len(openOrders) == 0 {
 		return
 	}
@@ -1045,22 +1061,26 @@ func (s *Strategy) checkSmartEntryReposition(openOrders, filledOrders []model.Tr
 
 	diffPct := (currentLastPrice - highestPrice) / highestPrice
 
-	// 4. Trigger Logic (Smart Entry V2.0 + Grid Gap Fix)
+	// 4. Trigger Logic (Smart Entry V2.0 + Grid Gap Fix + Idle Stagnation Fix)
+
 	// A) Price Runaway (Urgent)
+	// STRICT SAFETY: If we have inventory, DO NOT chase pumps.
 	isPriceRunaway := diffPct >= s.Cfg.SmartEntryRepositionPct
+	if len(filledOrders) > 0 {
+		isPriceRunaway = false // Disable Runaway trigger if carrying bags
+	}
+
 	cooldown := time.Duration(s.Cfg.SmartEntryRepositionCooldown) * time.Minute
 	isCooldownPassed := time.Since(highestOrder.CreatedAt) >= cooldown
 
 	// B) Stagnation (Idle Timeout)
+	// ALLOWED WITH INVENTORY: If we are stuck low for too long, move up.
 	maxIdle := time.Duration(s.Cfg.SmartEntryRepositionMaxIdleMin) * time.Minute
 	isStagnant := s.Cfg.SmartEntryRepositionMaxIdleMin > 0 && time.Since(highestOrder.CreatedAt) >= maxIdle
 
 	// C) Grid Gap Detection (Backfill Unification)
-	// If current price moved UP significantly leaving a gap > 2x GridSpacing
-	// We want to pull the bottom order UP to fill this gap.
-	// Logic: Diff > GridSpacing * 2.0
-	// We use 2.0 as threshold to ensure we don't churn on small noise.
-	// UPDATE: Use Dynamic Spacing from GK
+	// If current price moved UP significantly leaving a gap > 2.5x GridSpacing
+	// ALLOWED WITH INVENTORY: Filling a gap is healthy.
 	dynamicSpacing := s.VolatilityService.GetDynamicSpacing()
 	isGridGap := diffPct >= (dynamicSpacing * 2.5)
 
@@ -1073,7 +1093,7 @@ func (s *Strategy) checkSmartEntryReposition(openOrders, filledOrders []model.Tr
 	triggerReason := "Price Runaway"
 	if isGridGap {
 		triggerReason = "Grid Gap (Backfill)"
-	} else if isStagnant && !isPriceRunaway {
+	} else if isStagnant {
 		triggerReason = "Stagnation (Idle Timeout)"
 	}
 
