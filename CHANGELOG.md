@@ -1,5 +1,27 @@
 # Changelog
 
+## 2025-12-25
+### Corrigido (Critical Stability)
+- **Zombie Order Recovery (Auto-Heal)**:
+    - **Problema**: Desconexões de WebSocket podiam deixar o bot "cego", acreditando que ordens executadas offline ainda estavam abertas, travando o grid.
+    - **Solução**: Implementado `Periodic Sync` a cada 5 minutos. O bot cruza o banco local com a API da Binance, detecta discrepâncias e processa execuções perdidas (FILLED) automaticamente, recolocando a ordem oposta (Exit) imediatamente.
+- **Stuck Grid Fix (IgnoreInventoryForPlacement)**:
+    - **Problema**: O bot usava ordens de Venda antigas (Bags) como referência de "preço mínimo", impedindo compras durante quedas se houvesse inventário preso acima do preço atual.
+    - **Solução**: Lógica `placeNewGridOrders` refatorada para ignorar vendas ao calcular o gap. Agora o bot olha apenas para **Compras Ativas**. Se não houver compras próximas, ele reinicia o grid no preço atual, permitindo operar na baixa independente do passivo.
+- **Circuit Breaker & Anti-Ban (-2010 Protection)**:
+    - **Problema**: Em quedas rápidas, o bot entrava em loop infinito tentando ajustar o preço, gerando erros `-2010` (Immediate Match) e risco de banimento de IP.
+    - **Solução**:
+        1. **Cooldown**: Se a compra falhar 3x, o bot pausa novas compras por 60 segundos.
+        2. **Aggressive Backoff**: No retry, o preço é reduzido em **0.05%** (em vez de 1 tick), garantindo que a ordem entre como MAKER abaixo da faca caindo.
+### Melhorado
+- **Observabilidade (CSV Analyst)**:
+    - Adicionadas colunas profundas ao `analyze_strategy.csv`:
+        - `volatility_gk`: Valor puro do estimador Garman-Klass.
+        - `volatility_multiplier`: O multiplicador aplicado (1.8x ou 3.5x).
+        - `dynamic_spacing_pct`: O espaçamento final usado.
+        - `avg_holding_time_min`: Tempo médio de retenção dos trades.
+        - `max_drawdown_pct_1h`: Estimativa de risco baseada na oscilação da última hora.
+
 ## 2025-12-24
 ### Adicionado
 - **Dynamic Spread via Garman-Klass (Volatilidade Avançada)**:

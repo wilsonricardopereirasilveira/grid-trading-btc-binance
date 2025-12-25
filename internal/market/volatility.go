@@ -1,6 +1,7 @@
 package market
 
 import (
+	"fmt"
 	"math"
 	"strconv"
 	"sync"
@@ -71,11 +72,11 @@ func (s *VolatilityService) UpdateVolatility() {
 
 	// 3. Regime Detection
 	// If Short > Long * 1.5 -> Acceleration/Crash -> High Vol Multiplier
-	// Else -> Normal -> Low Vol Multiplier
+	// Fix: Added Threshold > 0.002 (0.2%) to avoid Low Volatility Noise triggering Crash Mode
 	var newMultiplier float64
 	var regime string
 
-	if longVol > 0 && shortVol > (longVol*1.5) {
+	if longVol > 0 && shortVol > (longVol*1.5) && shortVol > 0.002 {
 		newMultiplier = s.Cfg.HighVolMultiplier
 		regime = "HIGH_VOL_CRASH"
 	} else {
@@ -173,4 +174,31 @@ func (s *VolatilityService) GetDynamicSpacing() float64 {
 	}
 
 	return spacing
+}
+
+// GetMetrics returns the current internal state for logging/reporting
+func (s *VolatilityService) GetMetrics() (shortVol, multiplier float64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.currentVol, s.multiplier
+}
+
+// GetLastHourRange fetches the High and Low prices of the last 1h candle to estimate volatility/drawdown
+func (s *VolatilityService) GetLastHourRange() (high, low float64, err error) {
+	// Fetch last 1 candle of 1h interval
+	// Note: Binance returns the *current* open candle if we ask for recent.
+	// This captures the "High/Low" of the current hour so far, which matches our snapshot timestamp.
+	klines, err := s.Binance.GetRecentKlines(s.Cfg.Symbol, "1h", 1)
+	if err != nil {
+		return 0, 0, err
+	}
+	if len(klines) == 0 {
+		return 0, 0, fmt.Errorf("no klines found")
+	}
+
+	k := klines[0]
+	h, _ := strconv.ParseFloat(k.High, 64)
+	l, _ := strconv.ParseFloat(k.Low, 64)
+
+	return h, l, nil
 }

@@ -8,7 +8,9 @@ bin/
 main
 
 # Logs
+logs/old_analyzes/
 *.log
+logs/
 
 # Environment variables
 .env

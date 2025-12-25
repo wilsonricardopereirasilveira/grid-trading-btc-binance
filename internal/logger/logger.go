@@ -3,6 +3,7 @@ package logger
 import (
 	"log/slog"
 	"os"
+	"time"
 
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -24,8 +25,19 @@ func Init() {
 		Compress:   true, // disabled by default
 	}
 
+	// Configurar Timezone Global para SP
+	loc, err := time.LoadLocation("America/Sao_Paulo")
+	if err != nil {
+		// Fallback se não tiver tzdata (comum em docker alpine, mas vps linux geralmente tem)
+		// Vamos tentar hardcoded offset -3 se falhar
+		time.Local = time.FixedZone("BRT", -3*60*60)
+	} else {
+		time.Local = loc
+	}
+
 	opts := &slog.HandlerOptions{
 		Level: slog.LevelDebug,
+		// Custom Replacement for Time format if needed, but changing Global Time.Local usually affects slog default handler
 	}
 
 	// Use JSON handler for structured logging

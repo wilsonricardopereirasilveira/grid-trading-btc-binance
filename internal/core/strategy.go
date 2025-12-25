@@ -26,6 +26,7 @@ type Strategy struct {
 	lastUSDTAlertTime         time.Time
 	lastBNBAlertTime          time.Time
 	circuitBreakerTriggeredAt time.Time
+	lastBuyFailureTime        time.Time // Circuit Breaker for Order Placement -2010 loops
 	tickSize                  float64
 }
 
@@ -536,31 +537,50 @@ func (s *Strategy) checkTakeProfit(filledOrders, openOrders []model.Transaction,
 }
 
 func (s *Strategy) placeNewGridOrders(openOrders, filledOrders []model.Transaction, currentAsk, currentBid, bnbPrice float64) {
+	// CIRCUIT BREAKER CHECK
+	if time.Since(s.lastBuyFailureTime) < 60*time.Second {
+		// Silent return or debug log to avoid spam
+		return
+	}
+
 	allOrders := append(openOrders, filledOrders...)
 
-	// Sort by price ascending
-	sort.Slice(allOrders, func(i, j int) bool {
-		p1, _ := strconv.ParseFloat(allOrders[i].Price, 64)
-		p2, _ := strconv.ParseFloat(allOrders[j].Price, 64)
+	// Sort by price ascending to find lowest/highest for different logic
+	// But CRITICAL FIX: We must distinguish between "Active Grid Floor" (Open Buys) and "Inventory" (Filled/Sells).
+	// If we use Filled orders as the floor, the bot will never buy above an old bag.
+
+	var activeBuyOrders []model.Transaction
+	for _, o := range openOrders {
+		activeBuyOrders = append(activeBuyOrders, o)
+	}
+
+	sort.Slice(activeBuyOrders, func(i, j int) bool {
+		p1, _ := strconv.ParseFloat(activeBuyOrders[i].Price, 64)
+		p2, _ := strconv.ParseFloat(activeBuyOrders[j].Price, 64)
 		return p1 < p2
 	})
 
-	lowestPrice := currentAsk
-	if len(allOrders) > 0 {
-		p, _ := strconv.ParseFloat(allOrders[0].Price, 64)
-		lowestPrice = p
+	lowestActivePrice := currentAsk
+	if len(activeBuyOrders) > 0 {
+		p, _ := strconv.ParseFloat(activeBuyOrders[0].Price, 64)
+		lowestActivePrice = p
 	}
 
-	// Check drop percentage
-	dropPct := (lowestPrice - currentAsk) / lowestPrice
+	// Drop Percentage should be calculated from the LOWEST ACTIVE BUY.
+	// If no active buys, we are "starting fresh" at current price (dropPct = 0).
+	dropPct := 0.0
+	if len(activeBuyOrders) > 0 {
+		dropPct = (lowestActivePrice - currentAsk) / lowestActivePrice
+	}
 
-	isFirstBuy := len(allOrders) == 0
+	isGridEmptyOfBuys := len(activeBuyOrders) == 0
 	priceInRange := currentAsk >= s.Cfg.RangeMin && currentAsk <= s.Cfg.RangeMax
 
 	// DYNAMIC SPREAD via Volatility Service
 	dynamicSpacing := s.VolatilityService.GetDynamicSpacing()
 
-	if priceInRange && (isFirstBuy || dropPct >= dynamicSpacing) {
+	// Logic: Buy if (No Active Buys currently) OR (Price dropped enough below lowest active buy)
+	if priceInRange && (isGridEmptyOfBuys || dropPct >= dynamicSpacing) {
 		if len(allOrders) < s.Cfg.GridLevels {
 			// MAKER FIX: Use Current Bid (or slightly lower) to ensure we join the book and don't cross spread.
 			// Using currentAsk triggers Taker execution immediately on LIMIT buys.
@@ -630,18 +650,27 @@ func (s *Strategy) placeNewGridOrders(openOrders, filledOrders []model.Transacti
 					// Smart Backoff & Price Adjustment
 					time.Sleep(time.Duration(200+(i*100)) * time.Millisecond)
 
-					// Adjust Price: Decrease by tickSize for Buy
+					// Adjust Price: Decrease strictly to avoid Taker
 					if s.tickSize > 0 {
 						p, _ := strconv.ParseFloat(priceStr, 64)
-						newPrice := p - s.tickSize
+						// CRASH FIX: If price is falling fast, 1 tick is not enough.
+						// We need to back off significantly to be a MAKER.
+						// Let's drop 0.05% per retry. This is aggressive but guarantees placement.
+						// 87000 * 0.0005 = $43.
+						// If user wants to catch the knife, catching it $40 lower is better than failing.
+						dropStep := p * 0.0005 // 0.05%
+
+						newPrice := p - dropStep
 						priceStr = fmt.Sprintf("%.2f", newPrice)
-						logger.Info("📉 Adjusting Price for Retry", "old", req.Price, "new", priceStr)
+						logger.Info("📉 Adjusting Price (0.05%) for Retry", "old", req.Price, "new", priceStr)
 					}
 				}
 
 				if err != nil {
 					// Handle GTX Rejection (Post Only) caused by failure even after retries
-					logger.Error("❌ Failed to create Buy Order after retries", "error", err)
+					logger.Error("❌ Failed to create Buy Order after retries. Pausing Buys for 60s.", "error", err)
+					// CIRCUIT BREAKER: Pause buying to prevent ban/spam
+					s.lastBuyFailureTime = time.Now()
 					return
 				}
 
@@ -1031,7 +1060,9 @@ func (s *Strategy) checkSmartEntryReposition(openOrders, filledOrders []model.Tr
 	// We want to pull the bottom order UP to fill this gap.
 	// Logic: Diff > GridSpacing * 2.0
 	// We use 2.0 as threshold to ensure we don't churn on small noise.
-	isGridGap := diffPct >= (s.Cfg.GridSpacingPct * 2.5)
+	// UPDATE: Use Dynamic Spacing from GK
+	dynamicSpacing := s.VolatilityService.GetDynamicSpacing()
+	isGridGap := diffPct >= (dynamicSpacing * 2.5)
 
 	shouldReposition := (isPriceRunaway && isCooldownPassed) || isStagnant || isGridGap
 
@@ -1150,6 +1181,110 @@ func (s *Strategy) checkSmartEntryReposition(openOrders, filledOrders []model.Tr
 	if err := s.TransactionRepo.Save(newTx); err != nil {
 		logger.Error("Failed to save new reposition transaction", "error", err)
 	}
+}
+
+// ForceSyncOpenOrders performs a REVERSE SYNC: Checking if local 'open' orders are actually open on Binance.
+// If an order is missing from Binance Open Orders, we check its final status (FILLED/CANCELED) and update.
+func (s *Strategy) ForceSyncOpenOrders() {
+	// 1. Fetch ALL Open Orders from Binance
+	binantOpenOrders, err := s.Binance.GetOpenOrders(s.Cfg.Symbol)
+	if err != nil {
+		logger.Error("⚠️ Sync: Failed to fetch open orders from Binance", "error", err)
+		return
+	}
+
+	binanceOrderMap := make(map[string]api.OrderResponse)
+	for _, bo := range binantOpenOrders {
+		binanceOrderMap[bo.ClientOrderId] = bo
+	}
+
+	// 2. Iterate Local Open Orders
+	transactions := s.TransactionRepo.GetAll()
+	syncedCount := 0
+
+	for _, tx := range transactions {
+		// We only care about reconciling 'open' or 'waiting_sell' orders
+		if tx.StatusTransaction != "open" && tx.StatusTransaction != "waiting_sell" {
+			continue
+		}
+
+		if tx.Symbol != s.Cfg.Symbol {
+			continue
+		}
+
+		// Check if this local order exists in the Binance Open Orders list
+		_, isOpenOnBinance := binanceOrderMap[tx.ID]
+
+		if isOpenOnBinance {
+			continue // All good
+		}
+
+		// IF WE ARE HERE: Order is OPEN locally, but NOT in Binance Open Orders.
+		// Conclusion: It was Filled, Canceled, or Expired while we were offline/missed WS.
+		logger.Warn("🔄 Sync: Zombie Order Detected (Locally Open, Remote Closed). Recovering...", "id", tx.ID)
+
+		// Fetch specific order details to know exact final state
+		resp, err := s.Binance.GetOrder(tx.Symbol, tx.ID)
+		if err != nil {
+			logger.Error("⚠️ Sync: Failed to check status of zombie order", "id", tx.ID, "error", err)
+			continue
+		}
+
+		// Update Local State
+		if resp.Status == "FILLED" {
+			tx.StatusTransaction = "filled"
+			tx.Price = resp.Price
+			if resp.ExecutedQty != "" {
+				tx.Amount = resp.ExecutedQty
+			}
+			tx.Notes += " | Synced (Filled via Periodic Check)"
+			tx.UpdatedAt = time.Now()
+			s.TransactionRepo.Update(tx)
+			syncedCount++
+
+			logger.Info("✅ Sync: Order FILLED (Recovered)", "id", tx.ID)
+
+			// ACTION: If it was a BUY, we must ensure we have an Exit!
+			if tx.Type == "buy" {
+				logger.Info("🚀 Sync: Triggering Maker Exit for Recovered Buy", "buyID", tx.ID)
+				s.placeMakerExitOrder(&tx)
+			}
+
+			// ACTION: If it was a SELL (Maker Exit)
+			if tx.Type == "sell" {
+				tx.StatusTransaction = "closed"
+				now := time.Now()
+				tx.ClosedAt = &now
+				tx.Notes += " | Sold via Periodic Check"
+				s.TransactionRepo.Update(tx)
+				logger.Info("💰 Sync: Maker Exit Closed (Recovered)", "sellID", tx.ID)
+			}
+
+		} else if resp.Status == "CANCELED" || resp.Status == "EXPIRED" || resp.Status == "REJECTED" {
+			tx.StatusTransaction = "closed"
+			tx.Notes += fmt.Sprintf(" | Synced (%s via Periodic Check)", resp.Status)
+			tx.UpdatedAt = time.Now()
+			s.TransactionRepo.Update(tx)
+			logger.Warn("⚠️ Sync: Order CANCELED/EXPIRED (Recovered)", "id", tx.ID, "status", resp.Status)
+		}
+	}
+
+	if syncedCount > 0 {
+		logger.Info("✅ Periodic Sync Completed", "recovered_orders", syncedCount)
+	}
+}
+
+// StartPeriodicSync starts a background ticker to force sync orders every 5 minutes
+func (s *Strategy) StartPeriodicSync() {
+	go func() {
+		logger.Info("⏰ Starting Periodic Order Sync (Every 5 minutes)")
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			s.ForceSyncOpenOrders()
+		}
+	}()
 }
 
 func (s *Strategy) isMarketSafe(currentPrice float64) bool {

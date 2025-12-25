@@ -9,22 +9,25 @@ import (
 
 	"grid-trading-btc-binance/internal/config"
 	"grid-trading-btc-binance/internal/logger"
+	"grid-trading-btc-binance/internal/market"
 	"grid-trading-btc-binance/internal/repository"
 )
 
 type DataCollector struct {
-	Cfg             *config.Config
-	BalanceRepo     *repository.BalanceRepository
-	TransactionRepo *repository.TransactionRepository
-	MarketData      *MarketDataService
+	Cfg               *config.Config
+	BalanceRepo       *repository.BalanceRepository
+	TransactionRepo   *repository.TransactionRepository
+	MarketData        *MarketDataService
+	VolatilityService *market.VolatilityService
 }
 
-func NewDataCollector(cfg *config.Config, balanceRepo *repository.BalanceRepository, transactionRepo *repository.TransactionRepository, marketData *MarketDataService) *DataCollector {
+func NewDataCollector(cfg *config.Config, balanceRepo *repository.BalanceRepository, transactionRepo *repository.TransactionRepository, marketData *MarketDataService, volService *market.VolatilityService) *DataCollector {
 	return &DataCollector{
-		Cfg:             cfg,
-		BalanceRepo:     balanceRepo,
-		TransactionRepo: transactionRepo,
-		MarketData:      marketData,
+		Cfg:               cfg,
+		BalanceRepo:       balanceRepo,
+		TransactionRepo:   transactionRepo,
+		MarketData:        marketData,
+		VolatilityService: volService,
 	}
 }
 
@@ -32,7 +35,11 @@ func (c *DataCollector) CollectAndSave() {
 	logger.Info("📊 Collecting hourly data...")
 
 	// 1. Prepare Data
-	now := time.Now()
+	loc, _ := time.LoadLocation("America/Sao_Paulo")
+	if loc == nil {
+		loc = time.FixedZone("BRT", -3*60*60)
+	}
+	now := time.Now().In(loc)
 	timestamp := now.Format(time.RFC3339)
 
 	// Market Data
@@ -42,6 +49,10 @@ func (c *DataCollector) CollectAndSave() {
 	if btcPrice >= c.Cfg.RangeMin && btcPrice <= c.Cfg.RangeMax {
 		inRange = "true"
 	}
+
+	// Volatility Data (Telemetria GK)
+	currentVol, volMult := c.VolatilityService.GetMetrics()
+	dynamicSpacing := c.VolatilityService.GetDynamicSpacing()
 
 	// Range Utilization
 	rangeDiff := c.Cfg.RangeMax - c.Cfg.RangeMin
@@ -108,6 +119,10 @@ func (c *DataCollector) CollectAndSave() {
 	totalSellPrice := 0.0
 	feesBNB := 0.0
 
+	// Efficiency Metrics (Group 2)
+	totalHoldDurationMin := 0.0
+	countClosedTrades := 0
+
 	for _, tx := range recentTx {
 		tradesTotal++
 		amount, _ := strconv.ParseFloat(tx.Amount, 64)
@@ -119,35 +134,35 @@ func (c *DataCollector) CollectAndSave() {
 
 		if tx.Type == "buy" {
 			// Check if this buy has a completed Maker Exit (Sold)
-			// Maker-Maker Strategy uses the SAME transaction record, adding Sell details.
-			// Or maybe we treat "closed" buy as a completed cycle.
 			tradesBuy++
 			totalBuyPrice += price
 
 			if tx.StatusTransaction == "closed" && tx.SellOrderID != "" {
 				tradesSell++
 				// Volume for Sell side
-				// Use SellPrice if available, otherwise estimate?
-				// Model has SellPrice float64
 				sellVal := tx.SellPrice * tx.QuantitySold
 				if sellVal == 0 {
-					// Fallback if quantitySold not fully tracked yet (legacy?)
-					// Assume full amount sold at SellPrice
 					sellVal = tx.SellPrice * amount
 				}
 
 				volumeUSDT += sellVal
-				volumeBTC += amount // Sold same amount
+				volumeBTC += amount
 				totalSellPrice += tx.SellPrice
 
 				// Realized Profit
-				// (Sell Price - Buy Price) * Amount
 				pnl := (tx.SellPrice - price) * amount
 				realizedProfit += pnl
+
+				// Calculate Holding Time
+				if tx.ClosedAt != nil && !tx.CreatedAt.IsZero() {
+					duration := tx.ClosedAt.Sub(tx.CreatedAt).Minutes()
+					totalHoldDurationMin += duration
+					countClosedTrades++
+				}
 			}
 
 		} else if tx.Type == "sell" {
-			// Older strategy or Taker Sells if any exist
+			// Older strategy or Taker Sells
 			tradesSell++
 			totalVal := amount * price
 			volumeUSDT += totalVal
@@ -166,7 +181,28 @@ func (c *DataCollector) CollectAndSave() {
 		avgSellPrice = totalSellPrice / float64(tradesSell)
 	}
 
+	avgHoldingTimeMin := 0.0
+	if countClosedTrades > 0 {
+		avgHoldingTimeMin = totalHoldDurationMin / float64(countClosedTrades)
+	}
+
 	feesUSDTEquiv := feesBNB * bnbPrice
+
+	// Risk Metrics (Group 3)
+	// Estimate Intra-hour Max Drawdown based on Price Volatility
+	// MDD = (MinEquity - MaxEquity) / MaxEquity
+	hourHigh, hourLow, err := c.VolatilityService.GetLastHourRange()
+	maxDrawdownPct := 0.0
+	if err == nil && hourHigh > 0 {
+		// Simulations assuming inventory was roughly constant (snapshot approach)
+		// Or we could be more precise if we knew inventory at Peak, but this is a good proxy.
+		estimatedMaxEquity := balanceUSDT + (balanceBTC * hourHigh)
+		estimatedMinEquity := balanceUSDT + (balanceBTC * hourLow)
+
+		if estimatedMaxEquity > 0 {
+			maxDrawdownPct = ((estimatedMinEquity - estimatedMaxEquity) / estimatedMaxEquity) * 100
+		}
+	}
 
 	// 2. Prepare CSV Record
 	record := []string{
@@ -188,6 +224,11 @@ func (c *DataCollector) CollectAndSave() {
 		fmt.Sprintf("%.2f", bnbPrice),
 		inRange,
 
+		// Metrics Volatility (Group 1)
+		fmt.Sprintf("%.6f", currentVol),
+		fmt.Sprintf("%.2f", volMult),
+		fmt.Sprintf("%.4f", dynamicSpacing),
+
 		// Wallet
 		fmt.Sprintf("%.2f", balanceUSDT),
 		fmt.Sprintf("%.8f", balanceBTC),
@@ -207,9 +248,10 @@ func (c *DataCollector) CollectAndSave() {
 		fmt.Sprintf("%.8f", feesBNB),
 		fmt.Sprintf("%.4f", feesUSDTEquiv),
 		fmt.Sprintf("%d", openOrdersCount),
-		// Duplicate columns removed here
 		fmt.Sprintf("%.4f", unrealizedPnL),
 		fmt.Sprintf("%.2f", rangeUtilizationPct),
+		fmt.Sprintf("%.2f", avgHoldingTimeMin), // Group 2: Avg Holding Time
+		fmt.Sprintf("%.4f", maxDrawdownPct),    // Group 3
 	}
 
 	// 3. Save to CSV
@@ -250,9 +292,12 @@ func (c *DataCollector) appendToCSV(filename string, record []string) {
 			"timestamp", "strategy_name", "exchange", "symbol", "timeframe",
 			"grid_levels", "range_min", "range_max", "position_size_pct", "stop_loss_pct",
 			"btc_price", "bnb_price", "in_range",
+			"volatility_gk", "volatility_multiplier", "dynamic_spacing_pct",
 			"balance_usdt", "balance_btc", "balance_bnb", "strategy_equity_usdt", "inventory_ratio_btc",
 			"trades_total", "trades_buy", "trades_sell", "volume_usdt", "volume_btc", "realized_profit_usdt", "avg_buy_price", "avg_sell_price",
 			"total_fees_bnb", "total_fees_usdt_equiv", "open_orders_count", "unrealized_pnl_usdt", "range_utilization_pct",
+			"avg_holding_time_min",
+			"max_drawdown_pct_1h", // Group 3
 		}
 		if err := w.Write(header); err != nil {
 			logger.Error("Failed to write CSV header", "error", err)

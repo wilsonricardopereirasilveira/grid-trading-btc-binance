@@ -81,11 +81,12 @@ func main() {
 	}
 
 	// Services
+	// Services
 	marketDataService := service.NewMarketDataService()
-	dataCollector := service.NewDataCollector(cfg, balanceRepo, transactionRepo, marketDataService)
+	volatilityService := market.NewVolatilityService(cfg, binanceClient)
+	dataCollector := service.NewDataCollector(cfg, balanceRepo, transactionRepo, marketDataService, volatilityService)
 	telegramService := service.NewTelegramService(cfg)
 	streamService := service.NewStreamService(binanceClient)
-	volatilityService := market.NewVolatilityService(cfg, binanceClient)
 
 	// Start Volatility Polling
 	volatilityService.StartPolling()
@@ -101,6 +102,9 @@ func main() {
 
 	// Sync Orders with Binance (Handle Offline Changes)
 	strategy.SyncOrdersOnStartup()
+
+	// Start Periodic Order Sync (Every 5 min)
+	strategy.StartPeriodicSync()
 
 	// Start WebSocket Stream
 	go func() {
