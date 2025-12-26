@@ -592,7 +592,7 @@ func (s *Strategy) placeNewGridOrders(openOrders, filledOrders []model.Transacti
 			p, _ := strconv.ParseFloat(o.Price, 64)
 			distPct := math.Abs(p-currentAsk) / p
 			if distPct < minDist {
-				logger.Debug("🚫 Price too close to existing order", "current", currentAsk, "existing", p, "dist", distPct)
+				// logger.Debug("🚫 Price too close to existing order", "current", currentAsk, "existing", p, "dist", distPct)
 				isTooClose = true
 				break
 			}

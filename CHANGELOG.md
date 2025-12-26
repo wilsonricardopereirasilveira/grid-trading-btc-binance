@@ -28,6 +28,9 @@
         - `dynamic_spacing_pct`: O espaçamento final usado.
         - `avg_holding_time_min`: Tempo médio de retenção dos trades.
         - `max_drawdown_pct_1h`: Estimativa de risco baseada na oscilação da última hora.
+    - **Inventory Metrics Fix**:
+        - **Problema**: O relatório mostrava `inventory_ratio_btc` e `unrealized_pnl_usdt` como ZERO, pois lia apenas o saldo "Livre" (Free) da carteira, ignorando que o inventário estava "Bloqueado" (Locked) em ordens de venda Limit (Maker-Maker).
+        - **Solução**: `DataCollector` refatorado para calcular o inventário somando transações `filled` diretamente do banco de dados local. Agora reflete com precisão a exposição real da estratégia e o PnL flutuante das Bags.
 
 ## 2025-12-24
 ### Adicionado

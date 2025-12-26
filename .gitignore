@@ -9,6 +9,7 @@ main
 
 # Logs
 logs/old_analyzes/
+analyze_strategy.csv
 *.log
 logs/
 
@@ -16,7 +17,6 @@ logs/
 .env
 
 # Data / Generated files
-analyze_strategy.csv
 transactions.json
 
 # IDEs

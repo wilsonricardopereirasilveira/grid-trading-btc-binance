@@ -61,22 +61,7 @@ func (c *DataCollector) CollectAndSave() {
 		rangeUtilizationPct = ((btcPrice - c.Cfg.RangeMin) / rangeDiff) * 100
 	}
 
-	// Wallet Data
-	balanceUSDT := c.getBalance("USDT")
-	balanceBTC := c.getBalance("BTC")
-	balanceBNB := c.getBalance("BNB")
-
-	// Strategy Equity (USDT + BTC Value)
-	strategyEquity := balanceUSDT + (balanceBTC * btcPrice)
-
-	// Inventory Ratio
-	// Ratio = (BTC Value) / Total Equity
-	inventoryRatio := 0.0
-	if strategyEquity > 0 {
-		inventoryRatio = (balanceBTC * btcPrice) / strategyEquity
-	}
-
-	// Open Orders & Position Analysis (Unrealized PnL)
+	// 1. Open Orders & Position Analysis (TRUE Inventory from DB)
 	allTx := c.TransactionRepo.GetAll()
 	openOrdersCount := 0
 	totalCostBasis := 0.0
@@ -100,9 +85,29 @@ func (c *DataCollector) CollectAndSave() {
 		avgEntryPrice = totalCostBasis / totalQtyFilled
 	}
 
+	// 2. Wallet Data
+	balanceUSDT := c.getBalance("USDT")
+	balanceBTC := c.getBalance("BTC")
+	balanceBNB := c.getBalance("BNB")
+
+	// Strategy Equity (USDT + BTC Value)
+	// FIX: Use totalQtyFilled (Inventory) + balanceUSDT to better represent strategy value?
+	// Or stay with Wallet? If Wallet BTC is 0 (Locked), Equity drops.
+	// We should add Locked Inventory Value to Equity.
+	strategyEquity := balanceUSDT + (totalQtyFilled * btcPrice) + (balanceBTC * btcPrice)
+	// Note: balanceBTC is "Free". totalQtyFilled is "Locked in Strategy".
+	// Usually they shouldn't overlap if 'filled' implies 'open sell'.
+
+	// Inventory Ratio
+	// Ratio = (BTC Value) / Total Equity
+	inventoryRatio := 0.0
+	if strategyEquity > 0 {
+		inventoryRatio = ((totalQtyFilled + balanceBTC) * btcPrice) / strategyEquity
+	}
+
 	unrealizedPnL := 0.0
-	if balanceBTC > 0 && avgEntryPrice > 0 {
-		unrealizedPnL = (btcPrice - avgEntryPrice) * balanceBTC
+	if totalQtyFilled > 0 && avgEntryPrice > 0 {
+		unrealizedPnL = (btcPrice - avgEntryPrice) * totalQtyFilled
 	}
 
 	// Performance Hourly (Last 1h)
