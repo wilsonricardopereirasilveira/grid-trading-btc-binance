@@ -43,6 +43,13 @@ func NewStrategy(cfg *config.Config, balanceRepo *repository.BalanceRepository, 
 
 	// Fetch TickSize on startup
 	s.fetchTickSize()
+
+	// Cleanup Closed Transactions on Startup
+	cleaned := s.TransactionRepo.CleanupClosed()
+	if cleaned > 0 {
+		logger.Info("🧹 Startup Cleanup: Archived closed transactions", "count", cleaned)
+	}
+
 	return s
 }
 
@@ -236,8 +243,21 @@ func (s *Strategy) HandleOrderUpdate(event service.OrderUpdate) {
 				cost := buyPrice * qty
 				profit := revenue - cost
 
+				// tx.Notes += fmt.Sprintf(" | Sold at %.2f (Profit: $%.2f)", sellPrice, profit)
+				// s.TransactionRepo.Update(tx) // Old Update
+
+				// ARCHIVE AND DELETE
 				tx.Notes += fmt.Sprintf(" | Sold at %.2f (Profit: $%.2f)", sellPrice, profit)
-				s.TransactionRepo.Update(tx)
+				// Save final state to archive
+				if err := s.TransactionRepo.Archive(tx); err != nil {
+					logger.Error("⚠️ Failed to archive transaction", "id", tx.ID, "error", err)
+				}
+				// Remove from active
+				if err := s.TransactionRepo.Delete(tx.ID); err != nil {
+					logger.Error("⚠️ Failed to delete active transaction after archive", "id", tx.ID, "error", err)
+				} else {
+					logger.Info("📦 Transaction Archived and Removed from Active List", "id", tx.ID)
+				}
 
 				// Notify Exit
 				// Create a temporary "Sell" transaction for the notification so it renders as VENDA
@@ -852,8 +872,21 @@ func (s *Strategy) SyncOrdersOnStartup() {
 	for clientID, binOrder := range binanceOrderMap {
 		if _, exists := localOrderMap[clientID]; !exists {
 			// Orphan Detected!
-			// We skip if it's not a Grid Order (optional: check prefix?)
-			// But for safety, we track EVERYTHING for this symbol.
+
+			// DUPLICATE PREVENTER: Check if this "Orphan" Sell is actually linked to a Buy
+			if binOrder.Side == "SELL" {
+				isLinked := false
+				for _, localTx := range transactions {
+					if localTx.SellOrderID == clientID {
+						isLinked = true
+						break
+					}
+				}
+				if isLinked {
+					logger.Info("⚠️ Skipping import of Linked Sell Order (Already in DB as SellOrderID)", "id", clientID)
+					continue
+				}
+			}
 
 			logger.Warn("👻 Orphan Order Detected on Binance (Not in DB). Importing...", "id", clientID, "price", binOrder.Price)
 
@@ -875,9 +908,6 @@ func (s *Strategy) SyncOrdersOnStartup() {
 				CreatedAt:         time.Unix(binOrder.TransactTime/1000, 0),
 				UpdatedAt:         time.Now(),
 			}
-
-			// If it's a SELL, we try to link it to a buy if possible, but hard without context.
-			// Just saving it ensures we don't lose track of the exit.
 
 			if err := s.TransactionRepo.Save(newTx); err != nil {
 				logger.Error("Failed to save imported orphan order", "error", err)
@@ -942,16 +972,47 @@ func (s *Strategy) SyncOrdersOnStartup() {
 			logger.Info("✅ Order Synced: FILLED Offline", "id", tx.ID)
 
 			// ACTION: If it was a BUY, we must ensure we have an Exit!
+			// ACTION: If it was a BUY, we must ensure we have an Exit!
 			if tx.Type == "buy" {
-				// Check if we already have a sell order linked?
+				// SMART RECOVERY (Startup Sync Fix):
+				// Check if we already have a sell order linked or orphan.
+				// This handles cases where we created the order offline.
+
+				var foundSellID string
+				buyQtyFloat, _ := strconv.ParseFloat(resp.ExecutedQty, 64)
+
+				// 1. Check strict link
 				if tx.SellOrderID != "" {
-					// Check if that sell order is active?
-					// If SellOrderID exists, we assume logic handled it or it's the 'waiting_sell' one.
-					// But if it was just filled, likely no sell exists yet (unless partial).
-					// Let's double check.
+					if _, ok := binanceOrderMap[tx.SellOrderID]; ok {
+						foundSellID = tx.SellOrderID
+						logger.Info("🔗 Startup Relinking: Existing Sell Order found by ID.", "sellID", foundSellID)
+					}
 				}
-				logger.Info("🚀 Triggering Maker Exit for Offline Fill", "buyID", tx.ID)
-				s.placeMakerExitOrder(&tx)
+
+				// 2. Scan for Orphan Sell Orders (Match by Quantity)
+				if foundSellID == "" {
+					for _, bo := range binanceOrderMap {
+						if bo.Side == "SELL" {
+							sellQtyFloat, _ := strconv.ParseFloat(bo.OrigQty, 64)
+							if math.Abs(sellQtyFloat-buyQtyFloat) < 0.00000001 {
+								foundSellID = bo.ClientOrderId
+								logger.Info("🔗 Startup Relinking: Matching Orphan Sell Order found by Quantity.", "sellID", foundSellID)
+								break
+							}
+						}
+					}
+				}
+
+				if foundSellID != "" {
+					tx.SellOrderID = foundSellID
+					tx.StatusTransaction = "waiting_sell" // Or filled? waiting_sell implies we are waiting for it to fill. Correct.
+					tx.UpdatedAt = time.Now()
+					s.TransactionRepo.Update(tx)
+					logger.Info("✅ Startup Sync: Linked existing Sell Order.", "buyID", tx.ID, "sellID", foundSellID)
+				} else {
+					logger.Info("🚀 Startup Sync: Triggering Maker Exit for Offline Fill", "buyID", tx.ID)
+					s.placeMakerExitOrder(&tx)
+				}
 			}
 
 			// ACTION: If it was a SELL (Maker Exit), calculate profit
@@ -983,7 +1044,239 @@ func (s *Strategy) SyncOrdersOnStartup() {
 		}
 	}
 
-	logger.Info("✅ Startup Sync Completed", "synced_updates", syncedCount)
+	logger.Info("✅ Startup Sync Phase 2 Completed", "synced_updates", syncedCount)
+
+	// ===================================================================================
+	// PHASE 3: GHOST TRANSACTION CLEANUP
+	// Check all 'filled' transactions with a SellOrderID - if that sell order doesn't exist
+	// on Binance anymore, the sell was completed and we should archive it.
+	// Also cleans failed_placement entries.
+	// ===================================================================================
+	s.purgeGhostTransactions(binanceOrderMap)
+
+	// ===================================================================================
+	// PHASE 4: DUPLICATE TRANSACTION CLEANUP
+	// Removes standalone "SELL" transactions that are already linked to a "BUY"
+	// ===================================================================================
+	s.purgeDuplicateTransactions()
+
+	// ===================================================================================
+	// PHASE 5: ZOMBIE RESCUE (Naked Buys)
+	// Identifies "Filled" Buys that have NO Sell Order.
+	// Action: Attempts to place the missing Exit Order.
+	// If Insufficient Balance (already sold manually?), archives and cleans up.
+	// ===================================================================================
+	s.rescueZombieTransactions()
+}
+
+// rescueZombieTransactions finds "Filled" Buys without SellOrderID and tries to fix them
+func (s *Strategy) rescueZombieTransactions() {
+	logger.Info("🧟 Phase 5: Checking for Zombie Transactions (Filled Buys without Exit)...")
+	transactions := s.TransactionRepo.GetAll()
+	var rescueCount int
+
+	for _, tx := range transactions {
+		// Criteria: Buy + Filled + Empty SellOrderID
+		if tx.Type == "buy" && tx.StatusTransaction == "filled" && tx.SellOrderID == "" {
+			logger.Warn("🧟 Zombie Detected! Filled Buy with no Exit Order.", "id", tx.ID, "price", tx.Price)
+
+			// Attempt to Rescue: Place Exit Order
+			// We define a callback to handle failure (specifically insufficient balance)
+
+			// We need to call placeMakerExitOrder but catch specific errors?
+			// The current placeMakerExitOrder doesn't return error to here, checks internally.
+			// Let's modify it or rely on its behavior?
+			// Strategy: CALL IT. If it fails with Insufficient Balance, it should log.
+			// BUT, to archive it if failed, we need feedback.
+
+			// Custom Logic for Rescue:
+			balance := s.getBalance("BTC")
+			qty, _ := strconv.ParseFloat(tx.Amount, 64)
+
+			// Safety factor 0.999 is used in placeMakerExitOrder, let's verify here first?
+			if balance < qty*0.99 {
+				logger.Warn("🧟 Zombie Rescue Failed: Insufficient BTC Balance. Assuming manually sold.", "id", tx.ID, "needed", qty, "have", balance)
+
+				// Archive & Delete (It's a Ghost/Lost order)
+				tx.StatusTransaction = "closed"
+				tx.Notes += " | Zombie Cleaned (Insufficient Balance - Assumed Sold)"
+				s.TransactionRepo.Archive(tx)
+				s.TransactionRepo.Delete(tx.ID)
+				continue
+			}
+
+			// If we have balance, we try to place the order
+			logger.Info("🚑 Attempting Zombie Rescue: Placing Exit Order...", "id", tx.ID)
+			s.placeMakerExitOrder(&tx)
+			rescueCount++
+		}
+	}
+
+	if rescueCount > 0 {
+		logger.Info("✅ Zombie Rescue Operations Triggered", "count", rescueCount)
+	} else {
+		logger.Info("✅ No Zombie Transactions found")
+	}
+}
+
+// purgeDuplicateTransactions removes 'sell' type transactions that are already present as SellOrderID in a 'buy' transaction
+func (s *Strategy) purgeDuplicateTransactions() {
+	logger.Info("🧹 Phase 4: Checking for Duplicate Transactions...")
+	transactions := s.TransactionRepo.GetAll()
+
+	// Build map of linked SellIDs
+	linkedSellIDs := make(map[string]bool)
+	for _, tx := range transactions {
+		if tx.Type == "buy" && tx.SellOrderID != "" {
+			linkedSellIDs[tx.SellOrderID] = true
+		}
+	}
+
+	var matchCount int
+	for _, tx := range transactions {
+		if tx.Type == "sell" {
+			// Check if this Sell Transaction ID is used as a SellOrderID in any Buy
+			if linkedSellIDs[tx.ID] {
+				logger.Info("👯 Duplicate Sell Transaction Detected. Archiving...", "id", tx.ID)
+
+				// Archive
+				if err := s.TransactionRepo.Archive(tx); err != nil {
+					logger.Error("Failed to archive duplicate", "error", err)
+				}
+				// Delete
+				if err := s.TransactionRepo.Delete(tx.ID); err != nil {
+					logger.Error("Failed to delete duplicate", "error", err)
+				} else {
+					matchCount++
+				}
+			}
+		}
+	}
+
+	if matchCount > 0 {
+		logger.Info("✅ Duplicate Cleanup Complete", "removed_count", matchCount)
+	} else {
+		logger.Info("✅ No duplicate transactions found")
+	}
+}
+
+// purgeGhostTransactions removes transactions that reference orders no longer on Binance.
+// This handles cases where sells were filled while bot was offline.
+func (s *Strategy) purgeGhostTransactions(binanceOrderMap map[string]api.OrderResponse) int {
+	logger.Info("🧹 Phase 3: Checking for Ghost Transactions...")
+
+	transactions := s.TransactionRepo.GetAll()
+	var purgedCount int
+
+	for _, tx := range transactions {
+		shouldPurge := false
+		reason := ""
+
+		// Case 1: failed_placement - these never had valid orders
+		if tx.StatusTransaction == "failed_placement" {
+			shouldPurge = true
+			reason = "Failed Placement (Never had valid order)"
+		}
+
+		// Case 2: filled with SellOrderID - check if sell still exists
+		if tx.StatusTransaction == "filled" && tx.SellOrderID != "" {
+			if _, exists := binanceOrderMap[tx.SellOrderID]; !exists {
+				// Sell order doesn't exist in open orders - it was either filled or canceled
+				// We need to query Binance to find out the actual status
+				resp, err := s.Binance.GetOrder(tx.Symbol, tx.SellOrderID)
+				if err != nil {
+					logger.Warn("⚠️ Cannot verify sell order status (API error). Keeping transaction.", "id", tx.ID, "sellID", tx.SellOrderID, "error", err)
+					continue
+				}
+
+				if resp.Status == "FILLED" {
+					shouldPurge = true
+					reason = fmt.Sprintf("Sell FILLED offline at %s", resp.Price)
+					// Calculate profit for notes
+					buyPrice, _ := strconv.ParseFloat(tx.Price, 64)
+					sellPrice, _ := strconv.ParseFloat(resp.Price, 64)
+					qty, _ := strconv.ParseFloat(tx.Amount, 64)
+					profit := (sellPrice - buyPrice) * qty
+					tx.Notes += fmt.Sprintf(" | Sold at %.2f (Profit: $%.2f) [Ghost Recovery]", sellPrice, profit)
+				} else if resp.Status == "CANCELED" || resp.Status == "EXPIRED" {
+					// Sell order was canceled - we have exposure without exit!
+					// Don't purge, but reset to trigger new sell placement
+					logger.Warn("⚠️ Ghost Sell Order was CANCELED. Resetting to trigger new exit.", "id", tx.ID, "sellID", tx.SellOrderID)
+					tx.SellOrderID = ""
+					tx.StatusTransaction = "filled"
+					tx.Notes += " | Sell Canceled (Ghost Recovery: Needs New Exit)"
+					s.TransactionRepo.Update(tx)
+					// Immediately place new exit
+					s.placeMakerExitOrder(&tx)
+					continue
+				}
+			}
+		}
+
+		// Case 3: open buy that doesn't exist on Binance and isn't FILLED
+		if tx.StatusTransaction == "open" && tx.Type == "buy" {
+			if _, exists := binanceOrderMap[tx.ID]; !exists {
+				// Query to check actual status
+				resp, err := s.Binance.GetOrder(tx.Symbol, tx.ID)
+				if err != nil {
+					// Order truly doesn't exist - remove it
+					shouldPurge = true
+					reason = "Buy Order Not Found on Binance (Ghost)"
+				} else if resp.Status == "CANCELED" || resp.Status == "EXPIRED" {
+					shouldPurge = true
+					reason = fmt.Sprintf("Buy Order %s", resp.Status)
+				}
+				// If FILLED, Phase 2 should have handled it
+			}
+		}
+
+		if shouldPurge {
+			logger.Info("📦 Purging Ghost Transaction", "id", tx.ID, "reason", reason)
+
+			// Archive first
+			if err := s.TransactionRepo.Archive(tx); err != nil {
+				logger.Error("⚠️ Failed to archive ghost transaction", "id", tx.ID, "error", err)
+				continue
+			}
+
+			// Then delete
+			if err := s.TransactionRepo.Delete(tx.ID); err != nil {
+				logger.Error("⚠️ Failed to delete ghost transaction after archive", "id", tx.ID, "error", err)
+			} else {
+				purgedCount++
+			}
+		}
+	}
+
+	if purgedCount > 0 {
+		logger.Info("✅ Ghost Cleanup Complete", "purged_count", purgedCount)
+	} else {
+		logger.Info("✅ No ghost transactions found")
+	}
+
+	return purgedCount
+}
+
+// PeriodicSyncOrders runs the ghost cleanup periodically (every 5 min)
+// to catch any orders that got filled between syncs
+func (s *Strategy) PeriodicSyncOrders() {
+	logger.Info("🔄 Periodic Sync: Validating transactions against Binance...")
+
+	binanceOpenOrders, err := s.Binance.GetOpenOrders(s.Cfg.Symbol)
+	if err != nil {
+		logger.Error("❌ Periodic Sync Failed: Cannot fetch open orders", "error", err)
+		return
+	}
+
+	binanceOrderMap := make(map[string]api.OrderResponse)
+	for _, bo := range binanceOpenOrders {
+		binanceOrderMap[bo.ClientOrderId] = bo
+	}
+
+	purged := s.purgeGhostTransactions(binanceOrderMap)
+	if purged > 0 {
+		logger.Info("🧹 Periodic Sync: Cleaned up ghost transactions", "count", purged)
+	}
 }
 
 func (s *Strategy) checkAndAlertLowUSDT(currentBalance, required float64) {
@@ -1266,8 +1559,51 @@ func (s *Strategy) ForceSyncOpenOrders() {
 
 			// ACTION: If it was a BUY, we must ensure we have an Exit!
 			if tx.Type == "buy" {
-				logger.Info("🚀 Sync: Triggering Maker Exit for Recovered Buy", "buyID", tx.ID)
-				s.placeMakerExitOrder(&tx)
+				// SMART RECOVERY (Race Condition Fix):
+				// Before creating a NEW sell order, check if one already exists in Binance Open Orders.
+				// This handles cases where we created the order (via WS or other thread) but persistence failed (Race).
+
+				var foundSellID string
+				buyQtyFloat, _ := strconv.ParseFloat(resp.ExecutedQty, 64)
+
+				// 1. Check strict link (if we have ID but status was wrong)
+				if tx.SellOrderID != "" {
+					if _, ok := binanceOrderMap[tx.SellOrderID]; ok {
+						foundSellID = tx.SellOrderID
+						logger.Info("🔗 Relinking: Existing Sell Order found by ID.", "sellID", foundSellID)
+					}
+				}
+
+				// 2. Scan for Orphan Sell Orders (Match by Quantity)
+				// If we lost the ID (zero persistence), we look for a SELL with matching quantity.
+				if foundSellID == "" {
+					for _, bo := range binanceOrderMap {
+						if bo.Side == "SELL" {
+							sellQtyFloat, _ := strconv.ParseFloat(bo.OrigQty, 64)
+							// Tolerance for float comparison
+							if math.Abs(sellQtyFloat-buyQtyFloat) < 0.00000001 {
+								// We found a SELL order with matching quantity. Safe to assume it's ours?
+								// Grid logic usually 1:1.
+								foundSellID = bo.ClientOrderId
+								logger.Info("🔗 Relinking: Matching Orphan Sell Order found by Quantity.", "sellID", foundSellID)
+								break
+							}
+						}
+					}
+				}
+
+				if foundSellID != "" {
+					// We found an existing active sell order. Update our records instead of duplicating.
+					tx.SellOrderID = foundSellID
+					tx.StatusTransaction = "waiting_sell"
+					tx.UpdatedAt = time.Now()
+					s.TransactionRepo.Update(tx)
+					logger.Info("✅ Smart Recovery: Linked existing Sell Order. Skipped duplicate creation.", "buyID", tx.ID, "sellID", foundSellID)
+				} else {
+					// No existing sell order found. Proceed to create one.
+					logger.Info("🚀 Sync: Triggering Maker Exit for Recovered Buy", "buyID", tx.ID)
+					s.placeMakerExitOrder(&tx)
+				}
 			}
 
 			// ACTION: If it was a SELL (Maker Exit)
@@ -1303,6 +1639,7 @@ func (s *Strategy) StartPeriodicSync() {
 
 		for range ticker.C {
 			s.ForceSyncOpenOrders()
+			s.PeriodicSyncOrders() // Ghost cleanup
 		}
 	}()
 }

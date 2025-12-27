@@ -1,5 +1,41 @@
 # Changelog
 
+## 2025-12-27
+### Adicionado
+- **Metrics API Integration (Dashboard Sync)**:
+    - **O que é**: Integração com API externa para enviar métricas do bot a cada 100 ciclos (mesmo momento do log `Cycle Metrics (Last 100)`).
+    - **Payload enviado**: `strategy`, `cycles`, `min`, `max`, `avg` (em segundos), `uptime` (em segundos), `lastUpdated` e `now` (ambos em GMT-3).
+    - **Configuração**: Novas vars `METRICS_API_URL` e `METRICS_API_TOKEN` no `.env` para fácil customização do endpoint e autenticação.
+- **Storage & Performance Optimization (Transaction Archive)**:
+    - **O que é**: Implementação de sistema de arquivamento para o `transactions.json`.
+    - **Problema**: O arquivo de transações crescia indefinidamente com histórico de ordens `closed`, degradando a performance de leitura/escrita a cada ciclo.
+    - **Solução**:
+        - **Startup Cleanup**: Ao iniciar, o bot varre e move automaticamente transações finalizadas para `logs/transactions_history.json`.
+        - **Runtime Archive**: Assim que uma venda é concluída (ciclo fechado), a transação é imediatamente arquivada e removida da memória ativa, mantendo o `transactions.json` leve contendo apenas o estado atual do grid.
+
+### Corrigido (Critical Bug)
+- **Ghost Transaction Fix (Grid Lockup)**:
+    - **Problema**: Desconexões de WebSocket faziam o bot perder eventos de venda executados offline. O `transactions.json` acumulava ordens "fantasmas" (`filled` com `SellOrderID` já executado na Binance), fazendo o bot acreditar que o grid estava cheio (ex: 40/50) quando na realidade havia apenas 6 ordens reais. Isso bloqueava novas compras.
+    - **Solução**:
+        - **Startup Phase 3 (Ghost Cleanup)**: Ao iniciar, o bot agora valida **cada transação** contra a API da Binance. Se uma ordem não existir mais (filled/canceled offline), é arquivada e removida.
+        - **Periodic Ghost Sync**: A cada 5 minutos, o bot refaz essa validação para capturar qualquer ordem preenchida entre os syncs.
+        - **Smart Recovery**: Se uma ordem de venda foi cancelada (não filled), o bot automaticamente recoloca uma nova ordem de saída para proteger a exposição.
+- **Duplicate Transaction Fix (Orphan Import)**:
+    - **Problema**: O bot estava importando ordens de venda da Binance como "Órfãs" mesmo quando elas já estavam vinculadas a uma transação de compra local. Isso duplicava o registro (ex: 15 ordens ao invés de 7).
+    - **Solução**: Ajuste na fase de Sync para ignorar IDs que já operam como `SellOrderID`. Adicionada rotina de limpeza (`Phase 4`) para remover duplicatas existentes no startup.
+- **Zombie Rescue (Naked Buys Fix)**:
+    - **Problema**: Foram identificadas ordens de compra "Filled" sem ordem de venda correspondente (`SellOrderID` vazio) — provável desligamento do bot logo após a compra. Isso gerava discrepância de contagem (ex: 10 locais vs 7 Binance).
+    - **Solução (Phase 5)**: Nova rotina `rescueZombieTransactions` no startup.
+        - Se tiver saldo: Tenta colocar a ordem de saída (Maker Exit) imediatamente.
+        - Se não tiver saldo (vendido manualmente?): Arquiva a transação "zumbi" e remove da lista ativa.
+
+## 2025-12-26
+### Corrigido (High Priority Bug)
+- **Zero Balance / Zombie Order Fix (Race Condition)**:
+    - **Problema**: Em alta volatilidade, ocorria uma condição de corrida ("Race Condition") onde o WebSocket processava uma ordem de venda, mas o loop de sincronização (`ForceSyncOpenOrders`) lia o banco de dados desatualizado e tentava vender o mesmo saldo novamente, gerando erro `Insufficient Balance` e travando a recuperação.
+    - **Solução (Parte 1)**: Implementado `sync.RWMutex` no `TransactionRepository` para garantir segurança entre threads ("Thread Safety") e consistência atômica nas leituras/escritas do arquivo JSON.
+    - **Solução (Parte 2)**: Lógica `Smart Recovery` aprimorada. Agora, ao detectar uma ordem "Zombie" (Aberta localmente, fechada na Binance), o bot scaneia a API em busca de ordens de venda órfãs existentes antes de tentar criar novas. Se encontrar, apenas reconecta o link no banco de dados, prevenindo duplicidade e erros de saldo.
+
 ## 2025-12-25
 ### Corrigido (Critical Stability)
 - **Zombie Order Recovery (Auto-Heal)**:
@@ -31,6 +67,7 @@
     - **Inventory Metrics Fix**:
         - **Problema**: O relatório mostrava `inventory_ratio_btc` e `unrealized_pnl_usdt` como ZERO, pois lia apenas o saldo "Livre" (Free) da carteira, ignorando que o inventário estava "Bloqueado" (Locked) em ordens de venda Limit (Maker-Maker).
         - **Solução**: `DataCollector` refatorado para calcular o inventário somando transações `filled` diretamente do banco de dados local. Agora reflete com precisão a exposição real da estratégia e o PnL flutuante das Bags.
+
 
 ## 2025-12-24
 ### Adicionado

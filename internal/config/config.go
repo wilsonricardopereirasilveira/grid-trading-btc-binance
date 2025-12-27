@@ -49,6 +49,10 @@ type Config struct {
 	MaxDropPct5m           float64
 	CrashPauseMin          int
 	PauseBuys              bool
+
+	// Metrics API
+	MetricsAPIURL   string
+	MetricsAPIToken string
 }
 
 func Load() (*Config, error) {
@@ -217,6 +221,10 @@ func Load() (*Config, error) {
 	} else {
 		cfg.PauseBuys = false
 	}
+
+	// Metrics API (optional)
+	cfg.MetricsAPIURL = os.Getenv("METRICS_API_URL")
+	cfg.MetricsAPIToken = os.Getenv("METRICS_API_TOKEN")
 
 	return cfg, nil
 }
