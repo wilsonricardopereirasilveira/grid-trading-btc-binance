@@ -199,6 +199,12 @@ func (s *Strategy) HandleOrderUpdate(event service.OrderUpdate) {
 				if event.LastExecQty != "" {
 					tx.Amount = event.LastExecQty
 				}
+				// Fee Accumulation
+				if event.Commission != "" {
+					comm, _ := strconv.ParseFloat(event.Commission, 64)
+					currentFee, _ := strconv.ParseFloat(tx.Fee, 64)
+					tx.Fee = fmt.Sprintf("%.8f", currentFee+comm)
+				}
 				tx.Notes += " | WS Verified Fill"
 				s.TransactionRepo.Update(tx)
 
@@ -242,6 +248,13 @@ func (s *Strategy) HandleOrderUpdate(event service.OrderUpdate) {
 				revenue := sellPrice * qty
 				cost := buyPrice * qty
 				profit := revenue - cost
+
+				// Fee Accumulation (Sell Side)
+				if event.Commission != "" {
+					comm, _ := strconv.ParseFloat(event.Commission, 64)
+					currentFee, _ := strconv.ParseFloat(tx.Fee, 64)
+					tx.Fee = fmt.Sprintf("%.8f", currentFee+comm)
+				}
 
 				// tx.Notes += fmt.Sprintf(" | Sold at %.2f (Profit: $%.2f)", sellPrice, profit)
 				// s.TransactionRepo.Update(tx) // Old Update
@@ -1423,11 +1436,20 @@ func (s *Strategy) checkSmartEntryReposition(openOrders, filledOrders []model.Tr
 		return
 	}
 
-	// B) Update Old Order in Repo
+	// B) Update Old Order in Repo, Archive, and Delete
 	highestOrder.StatusTransaction = "closed"
 	highestOrder.Notes += " | Repositioned (Smart Entry)"
-	if err := s.TransactionRepo.Update(*highestOrder); err != nil {
-		logger.Error("Failed to update repositioned order", "error", err)
+
+	// Archive the canceled order to history
+	if err := s.TransactionRepo.Archive(*highestOrder); err != nil {
+		logger.Error("Failed to archive repositioned order", "error", err)
+	}
+
+	// Delete from active transactions
+	if err := s.TransactionRepo.Delete(highestOrder.ID); err != nil {
+		logger.Error("Failed to delete repositioned order", "error", err)
+	} else {
+		logger.Info("🗑️ Repositioned order archived and removed", "id", highestOrder.ID)
 	}
 
 	// C) Create New Order at CurrentBid (Maker Attempt)

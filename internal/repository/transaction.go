@@ -113,6 +113,40 @@ func (r *TransactionRepository) GetTransactionsAfter(timestamp time.Time) []mode
 	return filtered
 }
 
+// GetClosedTransactionsAfter reads the history file and returns closed transactions after timestamp
+// Used by the collector to calculate hourly realized profits from archived trades
+func (r *TransactionRepository) GetClosedTransactionsAfter(timestamp time.Time) []model.Transaction {
+	historyFile := "logs/transactions_history.json"
+
+	var history []model.Transaction
+	if !r.storage.Exists(historyFile) {
+		return history
+	}
+
+	if err := r.storage.Read(historyFile, &history); err != nil {
+		logger.Error("Failed to read history for metrics", "error", err)
+		return history
+	}
+
+	var filtered []model.Transaction
+	for _, tx := range history {
+		if tx.StatusTransaction == "closed" {
+			// For closed trades, use ClosedAt if available, else UpdatedAt
+			var checkTime time.Time
+			if tx.ClosedAt != nil {
+				checkTime = *tx.ClosedAt
+			} else {
+				checkTime = tx.UpdatedAt
+			}
+
+			if checkTime.After(timestamp) {
+				filtered = append(filtered, tx)
+			}
+		}
+	}
+	return filtered
+}
+
 // Remove deletes a transaction by ID and saves to file
 func (r *TransactionRepository) Remove(id string) error {
 	r.mu.Lock()

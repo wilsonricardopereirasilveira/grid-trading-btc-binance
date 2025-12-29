@@ -40,7 +40,7 @@ go build -o bot.exe .
 
 ### Linux (Nohup)
 ```bash
-go build -o grid-bot .
+go build -o grid-bot cmd/main.go
 chmod +x grid-bot
 nohup ./grid-bot > /dev/null 2>&1 &
 tail -F logs/app.log

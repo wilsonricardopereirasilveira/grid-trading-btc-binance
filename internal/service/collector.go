@@ -110,9 +110,9 @@ func (c *DataCollector) CollectAndSave() {
 		unrealizedPnL = (btcPrice - avgEntryPrice) * totalQtyFilled
 	}
 
-	// Performance Hourly (Last 1h)
+	// Performance Hourly (Last 1h) - Read from HISTORY file, not active transactions
 	lastHour := now.Add(-1 * time.Hour)
-	recentTx := c.TransactionRepo.GetTransactionsAfter(lastHour)
+	recentTx := c.TransactionRepo.GetClosedTransactionsAfter(lastHour)
 
 	tradesTotal := 0
 	tradesBuy := 0
@@ -129,50 +129,42 @@ func (c *DataCollector) CollectAndSave() {
 	countClosedTrades := 0
 
 	for _, tx := range recentTx {
-		tradesTotal++
-		amount, _ := strconv.ParseFloat(tx.Amount, 64)
-		price, _ := strconv.ParseFloat(tx.Price, 64)
-		fee, _ := strconv.ParseFloat(tx.Fee, 64)
+		// Only process type="buy" transactions that have been closed (sold)
+		// Skip orphan sell records and any repositioned/cancelled orders
+		if tx.Type != "buy" || tx.StatusTransaction != "closed" {
+			continue
+		}
 
-		// Accumulate Fees (Assuming BNB per user request)
+		// Skip repositioned orders (they were cancelled, not sold)
+		if tx.SellOrderID == "" || tx.SellPrice == 0 {
+			continue
+		}
+
+		tradesTotal++
+		tradesBuy++
+		tradesSell++ // Each closed buy = 1 sell executed
+
+		amount, _ := strconv.ParseFloat(tx.Amount, 64)
+		buyPrice, _ := strconv.ParseFloat(tx.Price, 64)
+		fee, _ := strconv.ParseFloat(tx.Fee, 64)
 		feesBNB += fee
 
-		if tx.Type == "buy" {
-			// Check if this buy has a completed Maker Exit (Sold)
-			tradesBuy++
-			totalBuyPrice += price
+		totalBuyPrice += buyPrice
 
-			if tx.StatusTransaction == "closed" && tx.SellOrderID != "" {
-				tradesSell++
-				// Volume for Sell side
-				sellVal := tx.SellPrice * tx.QuantitySold
-				if sellVal == 0 {
-					sellVal = tx.SellPrice * amount
-				}
+		sellVal := tx.SellPrice * amount
+		volumeUSDT += sellVal
+		volumeBTC += amount
+		totalSellPrice += tx.SellPrice
 
-				volumeUSDT += sellVal
-				volumeBTC += amount
-				totalSellPrice += tx.SellPrice
+		// Realized Profit = (SellPrice - BuyPrice) * Amount
+		pnl := (tx.SellPrice - buyPrice) * amount
+		realizedProfit += pnl
 
-				// Realized Profit
-				pnl := (tx.SellPrice - price) * amount
-				realizedProfit += pnl
-
-				// Calculate Holding Time
-				if tx.ClosedAt != nil && !tx.CreatedAt.IsZero() {
-					duration := tx.ClosedAt.Sub(tx.CreatedAt).Minutes()
-					totalHoldDurationMin += duration
-					countClosedTrades++
-				}
-			}
-
-		} else if tx.Type == "sell" {
-			// Older strategy or Taker Sells
-			tradesSell++
-			totalVal := amount * price
-			volumeUSDT += totalVal
-			volumeBTC += amount
-			totalSellPrice += price
+		// Calculate Holding Time
+		if tx.ClosedAt != nil && !tx.CreatedAt.IsZero() {
+			duration := tx.ClosedAt.Sub(tx.CreatedAt).Minutes()
+			totalHoldDurationMin += duration
+			countClosedTrades++
 		}
 	}
 

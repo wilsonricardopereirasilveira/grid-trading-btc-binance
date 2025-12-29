@@ -1,5 +1,17 @@
 # Changelog
 
+
+## 2025-12-29
+### Corrigido (Hotfix) - Observabilidade & Dados
+- **CSV Data Integrity Fix (Profit & Fees)**:
+    - **Problema**: O relatório horário `analyze_strategy.csv` apresentava colunas críticas zeradas (`realized_profit_usdt`, `total_fees_bnb`) fazendo parecer que a estratégia não lucrava.
+    - **Causa Raiz**:
+        1. **Profit**: O `DataCollector` lia apenas transações ativas na memória, mas transações lucrativas (fechadas) eram movidas imediatamente para o arquivo histórico (`transactions_history.json`), escapando da contabilização horária.
+        2. **Fees**: A captura de taxas de comissão (`Commission`) via WebSocket não estava implementada no recebimento de eventos `executionReport`, perdendo o dado permanentemente.
+    - **Solução**:
+        - **Historical Lookback**: Implementado novo método `GetClosedTransactionsAfter` no Repositório. O coletor agora varre o arquivo histórico em busca de trades fechados na última hora para somar o lucro.
+        - **Fee Capture**: Lógica de eventos (`HandleOrderUpdate`) atualizada para extrair e persistir as taxas tanto na compra quanto na venda, garantindo rastreio preciso de custos operacionais a partir de agora.
+
 ## 2025-12-27
 ### Adicionado
 - **Metrics API Integration (Dashboard Sync)**:
@@ -28,6 +40,9 @@
     - **Solução (Phase 5)**: Nova rotina `rescueZombieTransactions` no startup.
         - Se tiver saldo: Tenta colocar a ordem de saída (Maker Exit) imediatamente.
         - Se não tiver saldo (vendido manualmente?): Arquiva a transação "zumbi" e remove da lista ativa.
+- **Repositioned Order Cleanup Fix**:
+    - **Problema**: Ordens reposicionadas pelo "Smart Entry Reposition" eram marcadas como `closed` mas **nunca eram arquivadas e deletadas**. Isso causava acúmulo de transações fantasmas no `transactions.json` (ex: 10 locais vs 6 Binance).
+    - **Solução**: Agora, ao cancelar uma ordem para reposicionar, ela é imediatamente arquivada em `logs/transactions_history.json` e removida da lista ativa.
 
 ## 2025-12-26
 ### Corrigido (High Priority Bug)

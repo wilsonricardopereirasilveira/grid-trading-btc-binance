@@ -18,6 +18,7 @@ logs/
 
 # Data / Generated files
 transactions.json
+logs/transactions_history.json
 
 # IDEs
 .vscode/
