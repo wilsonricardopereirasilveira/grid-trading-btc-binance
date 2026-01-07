@@ -1,6 +1,18 @@
 # Changelog
 
 
+## 2026-01-07
+### Corrigido (Critical Bug)
+- **NOTIONAL Filter Fix (Minimum Order Value)**:
+    - **Problema**: O bot estava travado há dias incapaz de abrir novas ordens. O cálculo de quantidade arredondava para baixo (floor) valores próximos ao mínimo, resultando em Ordens com valor nocional de ~$4.56, violando o mínimo de $5.00 da Binance (`Filter failure: NOTIONAL`).
+    - **Solução**: Implementado uso de `math.Ceil` (teto) no cálculo de quantidade (`strategy.go`). Agora, o bot garante matematicamente que a quantidade calculada sempre arredonda para cima para atingir o valor mínimo de operação ($5.00+), resolvendo o bloqueio definitivamente.
+
+### Melhorado (Observabilidade)
+- **Log Noise Reduction (Limpeza de Logs)**:
+    - **Price Update**: Removido log repetitivo de atualização de preço ("Received price update"). O status da conexão WebSocket agora é "silencioso" (se não há erros, está conectado).
+    - **Metrics Log**: Intervalo de log de métricas ("Cycle Metrics") aumentado de 100 para **5.000 ciclos**, reduzindo spam.
+    - **API Weight**: Monitor de peso de API ajustado para logar apenas se o uso exceder **1.500** requisições (Limite é 6.000). Em operação normal (<1.000), o log permanece limpo.
+
 ## 2025-12-29
 ### Corrigido (Hotfix) - Observabilidade & Dados
 - **CSV Data Integrity Fix (Profit & Fees)**:

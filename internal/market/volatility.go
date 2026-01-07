@@ -168,9 +168,9 @@ func (s *VolatilityService) GetDynamicSpacing() float64 {
 
 	spacing := s.currentVol * s.multiplier
 
-	// SAFETY: Min Spacing 0.1% (0.001) to avoid fee death
-	if spacing < 0.001 {
-		spacing = 0.001
+	// SAFETY: Min Spacing 0.2% (0.002) to ensure profit after fees (0.15%)
+	if spacing < 0.002 {
+		spacing = 0.002
 	}
 
 	return spacing

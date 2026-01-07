@@ -659,13 +659,14 @@ func (s *Strategy) placeNewGridOrders(openOrders, filledOrders []model.Transacti
 				// User strategy seems to be "Buy the dip" via immediate orders when price trigger is hit.
 				// Let's use LIMIT GTC at currentAsk.
 
-				buyQty := orderValue / executionPrice
+				// NOTIONAL FIX: Calculate qty ensuring notional >= $5 (Binance min)
+				// Use math.Ceil to round UP, preventing truncation that causes NOTIONAL errors
+				minNotional := 5.0
+				minQtyForNotional := minNotional / executionPrice
+				buyQty := math.Ceil(minQtyForNotional*100000) / 100000 // Round UP to 5 decimals
 
 				// 1. Create Buy Order (Maker/Position Entry) on Binance
-				qtyStr := fmt.Sprintf("%.5f", buyQty) // Adjust precision! BTC usually 5 or 6?
-				// Important: LotSize filter. BTCUSDT min qty is usually 0.00001.
-				// We should ideally normalize quantity.
-				// For now using %.5f (0.00001) which is safe for BTC.
+				qtyStr := fmt.Sprintf("%.5f", buyQty)
 
 				priceStr := fmt.Sprintf("%.2f", executionPrice)
 				clientOrderID := fmt.Sprintf("BUY_%d_L%d", time.Now().UnixMilli(), currentLevel)
@@ -1470,8 +1471,11 @@ func (s *Strategy) checkSmartEntryReposition(openOrders, filledOrders []model.Tr
 		return
 	}
 
-	buyQty := orderValue / newPrice
-	qtyStr := fmt.Sprintf("%.5f", buyQty) // Fixed precision for BTC (TODO: Dynamic prec)
+	// NOTIONAL FIX: Calculate qty ensuring notional >= $5 (Binance min)
+	minNotional := 5.0
+	minQtyForNotional := minNotional / newPrice
+	buyQty := math.Ceil(minQtyForNotional*100000) / 100000 // Round UP to 5 decimals
+	qtyStr := fmt.Sprintf("%.5f", buyQty)
 
 	newClientOrderID := fmt.Sprintf("BUY_R_%d", time.Now().UnixMilli())
 

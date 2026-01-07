@@ -58,7 +58,7 @@ func (c *BinanceClient) GetRecentKlines(symbol, interval string, limit int) ([]K
 				logger.Error("🚨 CRITICAL API WEIGHT", "used", used, "limit", limit, "remaining", remaining)
 			} else if used > 3000 {
 				logger.Warn("⚠️ High API Weight Usage", "used", used, "limit", limit, "remaining", remaining)
-			} else if used%100 == 0 {
+			} else if used > 1500 {
 				logger.Info("📡 API Weight Monitor", "used", used, "limit", limit, "remaining", remaining)
 			}
 		}

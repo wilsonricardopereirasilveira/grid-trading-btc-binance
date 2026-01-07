@@ -60,10 +60,10 @@ func (t *Tracker) TrackCycle(duration time.Duration) {
 		t.MaxTime = duration
 	}
 
-	if t.BatchCount >= 100 {
+	if t.BatchCount >= 5000 {
 		avgTime := t.TotalTime / time.Duration(t.CycleCount)
 
-		logger.Info("Cycle Metrics (Last 100)",
+		logger.Info("Cycle Metrics (Last 5000)",
 			"duration_us", duration.Microseconds(),
 			"min_us", t.MinTime.Microseconds(),
 			"max_us", t.MaxTime.Microseconds(),
